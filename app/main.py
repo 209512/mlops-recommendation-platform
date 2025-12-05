@@ -1,5 +1,6 @@
 import logging
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -21,6 +22,7 @@ from app.infrastructure.redis import redis_client
 logger = logging.getLogger(__name__)
 
 
+@asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """애플리케이션 생명주기 관리"""
     # Startup 로직
@@ -35,15 +37,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error(f"Database connection failed: {e}")
         raise
 
-        # Redis 연결 확인
+    # Redis 연결 확인
     try:
         if redis_client:
-            await redis_client.ping()
+            redis_client.ping()
             logger.info("Redis connection established")
     except Exception as e:
         logger.warning(f"Redis connection failed: {e}")
 
-        # 모델 로딩 시도
+    # 모델 로딩 시도
     try:
         # TODO: 모델 로딩 로직 구현
         logger.info("Model loading skipped - not implemented")
@@ -64,7 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     try:
         if redis_client:
-            await redis_client.aclose() if hasattr(redis_client, 'aclose') else None
+            await redis_client.aclose() if hasattr(redis_client, "aclose") else None
     except Exception as e:
         logger.warning(f"Redis close failed: {e}")
 
@@ -102,11 +104,11 @@ app.add_middleware(MetricsMiddleware)
 async def mlops_exception_handler(request: Request, exc: MLOpsError) -> JSONResponse:
     """MLOps 전용 예외 핸들러"""
     return JSONResponse(
-        status_code=getattr(exc, 'status_code', 500),
+        status_code=getattr(exc, "status_code", 500),
         content={
-            "error": getattr(exc, 'error_type', 'MLOpsError'),
+            "error": getattr(exc, "error_type", "MLOpsError"),
             "message": str(exc),
-            "details": getattr(exc, 'details', {}),
+            "details": getattr(exc, "details", {}),
         },
     )
 

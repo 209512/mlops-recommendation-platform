@@ -48,6 +48,7 @@ dev = [
     "types-boto3",
     "types-redis",
     "types-requests",
+    "celery-types"
 ]
 
 [tool.hatch.build.targets.wheel]

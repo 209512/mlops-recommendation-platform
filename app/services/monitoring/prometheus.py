@@ -10,6 +10,7 @@ from prometheus_client import Counter, Gauge, Histogram
 import mlflow
 from app.core.config import settings
 from app.infrastructure.redis import get_redis_client
+from app.services.mlflow.tracking import get_mlflow_tracking_service
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +234,7 @@ class MLOpsMonitoring:
                     }
                 )
 
-                # CPU 사용량 경고
+            # CPU 사용량 경고
             cpu = psutil.cpu_percent(interval=1)
             if cpu > 90:
                 alerts.append(
@@ -279,18 +280,25 @@ class MLOpsMonitoring:
         return alerts
 
     def log_model_metrics(self, metrics: dict[str, float], model_version: str = "latest") -> None:
-        """모델 메트릭 로그"""
         try:
-            for metric_name, value in metrics.items():
-                if metric_name == "accuracy":
-                    self.model_accuracy.labels(model_version=model_version).set(value)
-                    # 다른 메트릭들도 필요에 따라 추가
+            # MLflowTrackingService 사용
+            mlflow_service = get_mlflow_tracking_service()
+            if mlflow_service and mlflow_service.client:
+                # experiment_id 동적 조회
+                experiment = mlflow_service.client.get_experiment_by_name(
+                    mlflow_service.experiment_name
+                )
+                experiment_id = experiment.experiment_id if experiment else None
 
-            # MLflow에도 기록
-            with mlflow.start_run():
-                mlflow.log_metrics(metrics)
-                mlflow.set_tag("model_version", model_version)
+                # 임시 실행 생성
+                run = mlflow_service.client.create_run(experiment_id=experiment_id or "0")
 
+                # 메트릭 기록
+                for metric_name, value in metrics.items():
+                    mlflow_service.client.log_metric(run.info.run_id, metric_name, value)
+
+                # 태그 설정
+                mlflow_service.client.set_tag(run.info.run_id, "model_version", model_version)
         except Exception as e:
             logger.error(f"Failed to log model metrics: {e}")
 

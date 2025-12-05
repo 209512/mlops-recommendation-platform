@@ -1,8 +1,8 @@
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from celery import Celery  # type: ignore
-from celery.schedules import crontab  # type: ignore
+from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -14,7 +14,11 @@ celery_app = Celery(
     "mlops_recommendation",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.services.recommendation.tasks", "app.services.mlflow.tasks"],
+    include=[
+        "app.services.recommendation.tasks",
+        "app.services.mlflow.tasks",
+        "app.services.monitoring.tasks",  # 추가
+    ],
 )
 
 # Celery 설정
@@ -34,19 +38,19 @@ celery_app.conf.update(
 # 주기적 태스크 설정
 celery_app.conf.beat_schedule = {
     # 매일 새벽 2시에 전체 모델 학습
-    "train-full-model-daily": {
-        "task": "app.services.recommendation.tasks.train_full_model_task",
+    "train-als-model-daily": {
+        "task": "train_als_model",  # 실제 태스크 이름으로 수정
         "schedule": crontab(hour=2, minute=0),
-    },
-    # 매일 새벽 3시에 증분 학습
-    "partial-fit-daily": {
-        "task": "app.services.recommendation.tasks.partial_fit_model_task",
-        "schedule": crontab(hour=3, minute=0),
     },
     # 매시간 모델 성능 모니터링
     "monitor-model-hourly": {
-        "task": "app.services.monitoring.tasks.monitor_model_performance",
+        "task": "monitor_model_performance",  # monitoring.tasks의 태스크
         "schedule": crontab(minute=0),
+    },
+    # 매일 새벽 3시에 사용자 선호도 업데이트
+    "update-user-preferences-daily": {
+        "task": "update_user_preferences",  # 실제 태스크 이름으로 수정
+        "schedule": crontab(hour=3, minute=0),
     },
 }
 

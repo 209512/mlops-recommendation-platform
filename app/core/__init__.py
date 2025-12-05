@@ -7,6 +7,7 @@ from app.core.exception import (
     TrainingError,
     create_http_exception,
 )
+
 from .security import security
 
 __all__ = [

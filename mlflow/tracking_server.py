@@ -1,9 +1,6 @@
 import os
 
-import mlflow.pyfunc
 from mlflow.tracking import MlflowClient
-
-import mlflow
 
 
 class MLflowTrackingServer:
@@ -13,12 +10,10 @@ class MLflowTrackingServer:
         self.tracking_uri = tracking_uri or os.getenv(
             "MLFLOW_TRACKING_URI", "http://localhost:5000"
         )
-        # None이 아님을 보장하여 MyPy 오류 해결
         if self.tracking_uri is None:
             self.tracking_uri = "http://localhost:5000"
 
-        mlflow.set_tracking_uri(self.tracking_uri)
-        self.client = MlflowClient()
+        self.client = MlflowClient(tracking_uri=self.tracking_uri)
 
     def create_experiment(self, name: str, tags: dict[str, str] | None = None) -> str:
         """실험 생성"""

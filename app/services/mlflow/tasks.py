@@ -10,9 +10,9 @@ logger = logging.getLogger(__name__)
 
 @current_app.task(bind=True, name="create_mlflow_experiment")
 def create_mlflow_experiment(
-        self: Any,
-        experiment_name: str,
-        tags: dict[str, str] | None = None,
+    self: Any,
+    experiment_name: str,
+    tags: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """MLflow 실험 생성"""
     try:
@@ -20,11 +20,8 @@ def create_mlflow_experiment(
         if not mlflow_service:
             raise Exception("MLflow service not available")
 
-            # 실험 생성
-        experiment_id = mlflow_service.create_experiment(
-            name=experiment_name,
-            tags=tags or {}
-        )
+        # 실험 생성
+        experiment_id = mlflow_service.create_experiment(name=experiment_name, tags=tags or {})
 
         return {
             "status": "success",
@@ -43,10 +40,10 @@ def create_mlflow_experiment(
 
 @current_app.task(bind=True, name="log_model_metrics")
 def log_model_metrics(
-        self: Any,
-        run_id: str,
-        metrics: dict[str, float],
-        step: int | None = None,
+    self: Any,
+    run_id: str,
+    metrics: dict[str, float],
+    step: int | None = None,
 ) -> dict[str, Any]:
     """모델 메트릭 로깅"""
     try:
@@ -56,12 +53,7 @@ def log_model_metrics(
 
             # 메트릭 로깅
         for metric_name, metric_value in metrics.items():
-            mlflow_service.log_metric(
-                run_id=run_id,
-                key=metric_name,
-                value=metric_value,
-                step=step
-            )
+            mlflow_service.log_metric(run_id=run_id, key=metric_name, value=metric_value, step=step)
 
         return {
             "status": "success",
@@ -80,10 +72,10 @@ def log_model_metrics(
 
 @current_app.task(bind=True, name="log_model_artifacts")
 def log_model_artifacts(
-        self: Any,
-        run_id: str,
-        artifact_path: str,
-        artifacts: list[str],
+    self: Any,
+    run_id: str,
+    artifact_path: str,
+    artifacts: list[str],
 ) -> dict[str, Any]:
     """모델 아티팩트 로깅"""
     try:
@@ -94,9 +86,7 @@ def log_model_artifacts(
             # 아티팩트 로깅
         for artifact in artifacts:
             mlflow_service.log_artifact(
-                run_id=run_id,
-                local_path=artifact,
-                artifact_path=artifact_path
+                run_id=run_id, local_path=artifact, artifact_path=artifact_path
             )
 
         return {
@@ -116,10 +106,10 @@ def log_model_artifacts(
 
 @current_app.task(bind=True, name="register_model")
 def register_model(
-        self: Any,
-        run_id: str,
-        model_name: str,
-        model_path: str = "model",
+    self: Any,
+    run_id: str,
+    model_name: str,
+    model_path: str = "model",
 ) -> dict[str, Any]:
     """모델 등록"""
     try:
@@ -129,9 +119,7 @@ def register_model(
 
             # 모델 등록
         model_version = mlflow_service.register_model(
-            run_id=run_id,
-            name=model_name,
-            model_path=model_path
+            run_id=run_id, name=model_name, model_path=model_path
         )
 
         return {
@@ -152,12 +140,7 @@ def register_model(
 
 
 @current_app.task(bind=True, name="transition_model_stage")
-def transition_model_stage(
-        self: Any,
-        model_name: str,
-        version: str,
-        stage: str
-) -> dict[str, Any]:
+def transition_model_stage(self: Any, model_name: str, version: str, stage: str) -> dict[str, Any]:
     """모델 스테이지 전환"""
     try:
         # TODO: MLflow 모델 스테이지 전환 기능 구현
@@ -181,17 +164,16 @@ def transition_model_stage(
 
 @current_app.task(bind=True, name="export_model_artifacts")
 def export_model_artifacts(
-        self: Any,
-        model_name: str,
-        version: str,
-        export_path: str,
+    self: Any,
+    model_name: str,
+    version: str,
+    export_path: str,
 ) -> dict[str, Any]:
     """모델 아티팩트 내보내기"""
     try:
         # TODO: MLflow 아티팩트 내보내기 기능 구현
         logger.info(
-            f"Exporting artifacts for model {model_name} "
-            f"version {version} to {export_path}"
+            f"Exporting artifacts for model {model_name} version {version} to {export_path}"
         )
 
         return {
@@ -212,12 +194,7 @@ def export_model_artifacts(
 
 
 @current_app.task(bind=True, name="generate_model_report")
-def generate_model_report(
-        self: Any,
-        model_name: str,
-        version: str,
-        run_id: str
-) -> dict[str, Any]:
+def generate_model_report(self: Any, model_name: str, version: str, run_id: str) -> dict[str, Any]:
     """모델 리포트 생성"""
     try:
         # TODO: MLflow 모델 리포트 생성 기능 구현
@@ -241,9 +218,7 @@ def generate_model_report(
 
 @current_app.task(bind=True, name="sync_metrics_to_monitoring")
 def sync_metrics_to_monitoring(
-        self: Any,
-        run_id: str,
-        metric_prefix: str = "mlflow"
+    self: Any, run_id: str, metric_prefix: str = "mlflow"
 ) -> dict[str, Any]:
     """MLflow 메트릭을 모니터링 시스템에 동기화"""
     try:

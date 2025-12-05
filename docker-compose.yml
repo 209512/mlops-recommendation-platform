@@ -91,6 +91,8 @@ services:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/mlops
       - REDIS_URL=redis://redis:6379
       - MLFLOW_TRACKING_URI=http://mlflow:5001
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy
@@ -102,10 +104,12 @@ services:
 
   celery-beat:
     build: .
-    command: celery -A app.infrastructure.celery beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    command: celery -A app.infrastructure.celery beat --loglevel=info
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/mlops
       - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy

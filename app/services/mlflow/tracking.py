@@ -6,7 +6,6 @@ import mlflow.sklearn
 from mlflow.tracking import MlflowClient
 from prometheus_client import Counter, Gauge, Histogram
 
-import mlflow
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -35,23 +34,18 @@ class MLflowTrackingService:
     def _initialize_client(self) -> None:
         """MLflow 클라이언트 초기화"""
         try:
-            # MLflow 추적 URI 설정
-            mlflow.set_tracking_uri(self.tracking_uri)
-
-            # 클라이언트 생성
             self.client = MlflowClient(tracking_uri=self.tracking_uri)
 
-            # 실험 생성 또는 가져오기
-            experiment = mlflow.get_experiment_by_name(self.experiment_name)
-            if experiment is None:
-                mlflow.create_experiment(self.experiment_name)
-                logger.info(f"Created MLflow experiment: {self.experiment_name}")
-            else:
-                logger.info(f"Using existing MLflow experiment: {self.experiment_name}")
-
+            if self.client:
+                experiment = self.client.get_experiment_by_name(self.experiment_name)
+                if experiment is None:
+                    self.client.create_experiment(self.experiment_name)
+                    logger.info(f"Created MLflow experiment: {self.experiment_name}")
+                else:
+                    logger.info(f"Using existing MLflow experiment: {self.experiment_name}")
         except Exception as e:
             logger.error(f"Failed to initialize MLflow client: {e}")
-            raise
+            self.client = None
 
     def start_run(
         self,
@@ -71,11 +65,21 @@ class MLflowTrackingService:
             실행 ID 또는 None
         """
         try:
+            if self.client is None:
+                logger.error("MLflow client not initialized")
+                return None
+
             if experiment_id is None:
-                experiment = mlflow.get_experiment_by_name(self.experiment_name)
+                experiment = self.client.get_experiment_by_name(self.experiment_name)
                 experiment_id = experiment.experiment_id if experiment else None
 
-            run = mlflow.start_run(run_name=run_name, experiment_id=experiment_id, tags=tags)
+            if experiment_id is None:
+                logger.error("No experiment ID available")
+                return None
+
+            run = self.client.create_run(experiment_id, tags=tags)
+            if run_name:
+                self.client.set_tag(run.info.run_id, "mlflow.runName", run_name)
 
             mlflow_active_runs.inc()
             mlflow_experiment_counter.labels(status="started").inc()
@@ -128,9 +132,12 @@ class MLflowTrackingService:
             성공 여부
         """
         try:
-            with mlflow.start_run(run_id=run_id):
-                for metric_name, metric_value in metrics.items():
-                    mlflow.log_metric(metric_name, metric_value, step=step)
+            if self.client is None:
+                logger.error("MLflow client not initialized")
+                return False
+
+            for metric_name, metric_value in metrics.items():
+                self.client.log_metric(run_id, metric_name, metric_value, step=step)
 
             logger.info(f"Logged {len(metrics)} metrics to run {run_id}")
             return True
@@ -151,9 +158,12 @@ class MLflowTrackingService:
             성공 여부
         """
         try:
-            with mlflow.start_run(run_id=run_id):
-                for param_name, param_value in parameters.items():
-                    mlflow.log_param(param_name, str(param_value))
+            if self.client is None:
+                logger.error("MLflow client not initialized")
+                return False
+
+            for param_name, param_value in parameters.items():
+                self.client.log_param(run_id, param_name, str(param_value))
 
             logger.info(f"Logged {len(parameters)} parameters to run {run_id}")
             return True
@@ -184,17 +194,16 @@ class MLflowTrackingService:
             성공 여부
         """
         try:
-            with mlflow.start_run(run_id=run_id):
-                if model_type == "sklearn":
-                    mlflow.sklearn.log_model(
-                        model, model_name, registered_model_name=registered_model_name
-                    )
-                elif model_type == "pytorch":
-                    mlflow.pytorch.log_model(
-                        model, model_name, registered_model_name=registered_model_name
-                    )
-                else:
-                    mlflow.sklearn.log_model(model, model_name)
+            if model_type == "sklearn":
+                mlflow.sklearn.log_model(
+                    model, model_name, registered_model_name=registered_model_name
+                )
+            elif model_type == "pytorch":
+                mlflow.pytorch.log_model(
+                    model, model_name, registered_model_name=registered_model_name
+                )
+            else:
+                mlflow.sklearn.log_model(model, model_name)
 
             logger.info(f"Logged model {model_name} to run {run_id}")
             return True
@@ -217,12 +226,12 @@ class MLflowTrackingService:
             if experiment_name is None:
                 experiment_name = self.experiment_name
 
-            experiment = mlflow.get_experiment_by_name(experiment_name)
-            if not experiment:
-                return {"runs": []}
-
             if self.client is None:
                 logger.error("MLflow client not initialized")
+                return {"runs": []}
+
+            experiment = self.client.get_experiment_by_name(experiment_name)
+            if not experiment:
                 return {"runs": []}
 
             runs = self.client.search_runs(experiment_ids=[experiment.experiment_id])
@@ -267,12 +276,12 @@ class MLflowTrackingService:
             if experiment_name is None:
                 experiment_name = self.experiment_name
 
-            experiment = mlflow.get_experiment_by_name(experiment_name)
-            if not experiment:
-                return None
-
             if self.client is None:
                 logger.error("MLflow client not initialized")
+                return None
+
+            experiment = self.client.get_experiment_by_name(experiment_name)
+            if not experiment:
                 return None
 
             runs = self.client.search_runs(
@@ -296,6 +305,66 @@ class MLflowTrackingService:
             logger.error(f"Failed to get best model: {e}")
             return None
 
+    def create_experiment(self, name: str, tags: dict[str, str] | None = None) -> str:
+        """실험 생성"""
+        if self.client is None:
+            logger.error("MLflow client not initialized")
+            return ""
+
+        experiment = self.client.get_experiment_by_name(name)
+        if experiment:
+            return str(experiment.experiment_id)
+
+        experiment_id = self.client.create_experiment(name, tags=tags or {})
+        return str(experiment_id)
+
+    def log_metric(self, run_id: str, key: str, value: float, step: int | None = None) -> bool:
+        """단일 메트릭 로그"""
+        try:
+            if self.client is None:
+                logger.error("MLflow client not initialized")
+                return False
+
+            self.client.log_metric(run_id, key, value, step=step)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to log metric: {e}")
+            return False
+
+    def log_artifact(self, run_id: str, local_path: str, artifact_path: str | None = None) -> bool:
+        """아티팩트 로그"""
+        try:
+            if self.client is None:
+                logger.error("MLflow client not initialized")
+                return False
+
+                # MLflow client를 통해 아티팩트 로그 (mlflow.tracking 사용)
+
+            client = MlflowClient(tracking_uri=self.tracking_uri)
+
+            # run_id로 실행 정보 가져오기
+            run = client.get_run(run_id)
+            if run:
+                # 아티팩트 로그
+                client.log_artifact(run_id, local_path, artifact_path)
+                return True
+            else:
+                logger.error(f"Run {run_id} not found")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to log artifact: {e}")
+            return False
+
+    def register_model(self, run_id: str, name: str, model_path: str = "model") -> str:
+        """모델 등록"""
+        if self.client is None:
+            logger.error("MLflow client not initialized")
+            return ""
+
+        model_uri = f"runs:/{run_id}/{model_path}"
+        model_version = self.client.create_model_version(name, model_uri, run_id)
+        return str(model_version.version)
+
     def cleanup(self) -> None:
         """리소스 정리"""
         try:
@@ -303,8 +372,7 @@ class MLflowTrackingService:
                 logger.warning("MLflow client not initialized, skipping cleanup")
                 return
 
-            # 활성 실행 종료
-            experiment = mlflow.get_experiment_by_name(self.experiment_name)
+            experiment = self.client.get_experiment_by_name(self.experiment_name)
             if experiment:
                 active_runs = self.client.search_runs(
                     experiment_ids=[experiment.experiment_id], filter_string="status = 'RUNNING'"
