@@ -190,6 +190,7 @@ datasets/
 *.csv
 *.json
 *.parquet
+!monitoring/grafana/dashboards/mlops-dashboard.json
 
 # Jupyter checkpoints
 .ipynb_checkpoints/

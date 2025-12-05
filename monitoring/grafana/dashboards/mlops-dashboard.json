@@ -1,0 +1,37 @@
+{
+  "dashboard": {
+    "title": "MLOps Recommendation Dashboard",
+    "panels": [
+      {
+        "title": "Model Training Duration",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(ml_training_duration_seconds_bucket[5m]))",
+            "legendFormat": "95th percentile"
+          }
+        ]
+      },
+      {
+        "title": "Recommendation Latency",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, rate(recommendation_latency_seconds_bucket[5m]))",
+            "legendFormat": "99th percentile"
+          }
+        ]
+      },
+      {
+        "title": "Model Accuracy",
+        "type": "singlestat",
+        "targets": [
+          {
+            "expr": "ml_model_accuracy",
+            "legendFormat": "Current Accuracy"
+          }
+        ]
+      }
+    ]
+  }
+}
