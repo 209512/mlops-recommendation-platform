@@ -1,0 +1,46 @@
+name: CD Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  deploy-to-eks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-northeast-2
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build, tag, and push Docker image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: mlops-recommendation
+        IMAGE_TAG: ${{ github.sha }}
+      run: |  
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .  
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG  
+          
+        # Also push latest tag  
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest  
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest  
+
+    - name: Update kubeconfig
+      run: aws eks update-kubeconfig --region ap-northeast-2 --name mlops-cluster
+
+    - name: Deploy to Kubernetes
+      run: |  
+        kubectl set image deployment/mlops-recommendation-api \  
+          api=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -n mlops-recommendation  
+        kubectl rollout status deployment/mlops-recommendation-api -n mlops-recommendation

@@ -1,0 +1,69 @@
+name: Code Quality
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  sonarqube:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # SonarQube needs full history
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |  
+        python -m pip install --upgrade pip  
+        pip install -r requirements-dev.txt  
+        pip install -e .  
+
+    - name: Run MyPy
+      run: |  
+        mypy . --ignore-missing-imports  
+
+    - name: Run Ruff
+      run: |  
+        ruff check .  
+        ruff format --check .  
+
+    - name: Run tests with coverage
+      run: |  
+        pytest --cov=app --cov-report=xml --cov-report=html  
+
+    - name: SonarQube Scan
+      uses: sonarqube-quality-gate-action@master
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run Bandit Security Scan
+      run: |  
+        pip install bandit  
+        bandit -r app/ -f json -o bandit-report.json  
+
+    - name: Run Safety Check
+      run: |  
+        pip install safety  
+        safety check --json --output safety-report.json  
+
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |  
+          bandit-report.json  
+          safety-report.json
