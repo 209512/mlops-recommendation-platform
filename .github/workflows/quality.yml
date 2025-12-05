@@ -1,69 +1,78 @@
-name: Code Quality
+name: Code Quality & Security
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main, develop ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
+  schedule:
+    - cron: '0 2 * * 1'  # 매주 월요일 새벽 2시
+  workflow_dispatch:
 
 jobs:
-  sonarqube:
+  comprehensive-analysis:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # SonarQube needs full history
+        fetch-depth: 0
 
-    - name: Set up Python
+    - name: Set up Python 3.11
       uses: actions/setup-python@v4
       with:
-        python-version: "3.11"
+        python-version: '3.11'
 
-    - name: Install dependencies
-      run: |  
-        python -m pip install --upgrade pip  
-        pip install -r requirements-dev.txt  
-        pip install -e .  
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v2
+      
+    - name: Create virtual environment
+      run: uv venv
+      
+    - name: Install dependencies and deep scan tools
+      run: uv pip install -e ".[dev]" semgrep radon mccabe
 
-    - name: Run MyPy
-      run: |  
-        mypy . --ignore-missing-imports  
+    - name: Run comprehensive MyPy (Strict Check)
+      run: mypy . --ignore-missing-imports --strict
 
-    - name: Run Ruff
+    - name: Run Ruff with all checks
       run: |  
-        ruff check .  
+        ruff check . --select ALL  
         ruff format --check .  
 
-    - name: Run tests with coverage
+    - name: Run Pylint
+      run: pylint app/ --output-format=text > pylint-report.txt || true
+      
+    - name: Run tests with detailed coverage
       run: |  
-        pytest --cov=app --cov-report=xml --cov-report=html  
+        pytest tests/ --cov=app --cov-report=xml --cov-report=html --cov-fail-under=80  
+        coverage xml  
+        coverage html  
+
+    - name: Run Security Scans (Bandit, Safety, Semgrep)
+      run: |  
+        bandit -r app/ -f json -o bandit-report.json -ll  
+        safety check --json --output safety-report.json  
+        semgrep --config=auto --json --output=semgrep-report.json app/ || true
+
+    - name: Check for complex code (Radon)
+      run: radon cc app/ --min B --exclude "*/__init__.py" > radon-cc-report.txt
 
     - name: SonarQube Scan
-      uses: sonarqube-quality-gate-action@master
+      uses: SonarSource/sonarqube-scan-action@v2.1.0
       env:
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-  security-scan:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Run Bandit Security Scan
-      run: |  
-        pip install bandit  
-        bandit -r app/ -f json -o bandit-report.json  
-
-    - name: Run Safety Check
-      run: |  
-        pip install safety  
-        safety check --json --output safety-report.json  
-
-    - name: Upload security reports
+    - name: Upload all reports
       uses: actions/upload-artifact@v3
+      if: always()
       with:
-        name: security-reports
+        name: quality-reports
         path: |  
+          coverage.xml  
+          htmlcov/  
           bandit-report.json  
-          safety-report.json
+          safety-report.json  
+          semgrep-report.json
+          pylint-report.txt
+          radon-cc-report.txt
