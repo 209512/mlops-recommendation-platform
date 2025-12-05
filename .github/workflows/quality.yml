@@ -31,6 +31,9 @@ jobs:
     - name: Install dependencies and deep scan tools
       run: uv pip install -e ".[dev]" semgrep radon mccabe
 
+    - name: Add Venv Binaries to PATH
+      run: echo "$(pwd)/.venv/bin" >> $GITHUB_PATH
+
     - name: Run comprehensive MyPy (Strict Check)
       run: mypy . --ignore-missing-imports --strict
 
@@ -64,7 +67,7 @@ jobs:
         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
     - name: Upload all reports
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: quality-reports
