@@ -46,7 +46,7 @@ jobs:
       run: pylint app/ --output-format=text > pylint-report.txt || true
 
     - name: SonarQube Scan
-      uses: sonarqube-quality-gate-action@master
+      uses: SonarSource/sonarqube-scan-action@v2.1.0
       env:
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
