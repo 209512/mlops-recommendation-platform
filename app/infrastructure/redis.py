@@ -13,7 +13,7 @@ class RedisClient:
     """싱글톤 Redis 클라이언트"""
 
     _instance: Optional["RedisClient"] = None
-    _client: Redis | None = None
+    _client: Redis[bytes] | None = None
 
     def __new__(cls) -> "RedisClient":
         if cls._instance is None:
@@ -28,7 +28,7 @@ class RedisClient:
             )
         return cls._instance
 
-    def get_client(self) -> Redis:
+    def get_client(self) -> Redis[bytes]:
         """Redis 클라이언트 인스턴스 반환"""
         if self._client is None:
             raise RuntimeError("Redis client not initialized")
@@ -51,12 +51,10 @@ class RedisClient:
             logger.error(f"Redis health check failed: {e}")
             return False
 
-        # 전역 Redis 클라이언트 인스턴스
-
 
 redis_client = RedisClient()
 
 
-def get_redis_client() -> Redis:
+def get_redis_client() -> Redis[bytes]:
     """Redis 클라이언트 의존성 주입"""
     return redis_client.get_client()

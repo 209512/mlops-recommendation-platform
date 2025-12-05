@@ -65,10 +65,12 @@ class MLOpsMonitoring:
 
         self.redis_client = get_redis_client()
 
-    def track_recommendation(self, model_version: str = "latest") -> Callable:
+    def track_recommendation(
+        self, model_version: str = "latest"
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """추천 생성 추적 데코레이터"""
 
-        def decorator(func: Callable) -> Callable:
+        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             @wraps(func)
             def wrapper(*args: Any, **kwargs: Any) -> Any:
                 start_time = time.time()
@@ -107,10 +109,12 @@ class MLOpsMonitoring:
 
         return decorator
 
-    def track_training(self, model_type: str = "als") -> Callable:
+    def track_training(
+        self, model_type: str = "als"
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """모델 학습 추적 데코레이터"""
 
-        def decorator(func: Callable) -> Callable:
+        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             @wraps(func)
             def wrapper(*args: Any, **kwargs: Any) -> Any:
                 start_time = time.time()
