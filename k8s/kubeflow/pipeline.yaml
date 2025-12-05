@@ -1,0 +1,95 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: als-training-pipeline
+  namespace: mlops-recommendation
+spec:
+  entrypoint: als-training
+  templates:
+  - name: als-training
+    steps:
+    - - name: preprocess-data
+        template: preprocess
+    - - name: train-model
+        template: train
+        arguments:
+          artifacts:
+          - name: preprocessed-data
+            from: "{{steps.preprocess-data.outputs.artifacts.preprocessed-data}}"
+    - - name: evaluate-model
+        template: evaluate
+        arguments:
+          artifacts:
+          - name: trained-model
+            from: "{{steps.train-model.outputs.artifacts.trained-model}}"
+    - - name: deploy-model
+        template: deploy
+        when: "{{steps.evaluate-model.outputs.parameters.deploy-approved}} == true"
+        arguments:
+          artifacts:
+          - name: model-to-deploy
+            from: "{{steps.train-model.outputs.artifacts.trained-model}}"
+
+  - name: preprocess
+    container:
+      image: mlops-recommendation:latest
+      command: [python, -m, app.management.commands.preprocess_data]
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "250m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
+    outputs:
+      artifacts:
+      - name: preprocessed-data
+        path: /tmp/preprocessed
+
+  - name: train
+    container:
+      image: mlops-recommendation:latest
+      command: [python, -m, app.management.commands.train_model]
+      env:
+      - name: MLFLOW_TRACKING_URI
+        value: "http://mlflow:5001"
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "1000m"
+        limits:
+          memory: "2Gi"
+          cpu: "2000m"
+    outputs:
+      artifacts:
+      - name: trained-model
+        path: /tmp/models
+
+  - name: evaluate
+    container:
+      image: mlops-recommendation:latest
+      command: [python, -m, app.management.commands.evaluate_model]
+      resources:
+        requests:
+          memory: "512Mi"
+          cpu: "500m"
+        limits:
+          memory: "1Gi"
+          cpu: "1000m"
+    outputs:
+      parameters:
+      - name: deploy-approved
+        valueFrom:
+          path: /tmp/deploy-approved.txt
+
+  - name: deploy
+    container:
+      image: mlops-recommendation:latest
+      command: [python, -m, app.management.commands.deploy_model]
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "250m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlops-config
+  namespace: mlops-recommendation
+data:
+  DATABASE_URL: "postgresql://username:password@postgres:5432/mlops_recommendation"
+  REDIS_URL: "redis://redis:6379/0"
+  MLFLOW_TRACKING_URI: "http://mlflow:5001"
+  ALS_MODEL_VERSION: "v1"
+  PROMETHEUS_PORT: "8001"
+  MODEL_STORAGE_PATH: "/app/models"
+  LOG_LEVEL: "INFO"
+  APP_NAME: "MLOps Recommendation Platform"
+  DEBUG: "false"
+  CELERY_BROKER_URL: "redis://redis:6379/0"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+  AWS_REGION: "ap-northeast-2"
