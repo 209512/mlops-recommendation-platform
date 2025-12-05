@@ -3,7 +3,7 @@ import pickle
 import time
 from typing import Any, TypedDict
 
-import implicit  # type: ignore
+import implicit
 from scipy.sparse import csr_matrix
 
 from app.infrastructure.redis import get_redis_client

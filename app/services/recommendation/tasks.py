@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-import implicit  # type: ignore
+import implicit
 from celery import current_app
 
 from app.core.config import settings
