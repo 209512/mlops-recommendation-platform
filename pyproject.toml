@@ -41,6 +41,7 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.7.0",
     "pytest-cov>=4.1.0",
+    "aiosqlite>=0.19.0",
     "types-passlib",
     "types-psutil",
     "scipy-stubs",
@@ -81,6 +82,10 @@ warn_unused_ignores = false
 
 [[tool.mypy.overrides]]
 module = "implicit.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sklearn.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

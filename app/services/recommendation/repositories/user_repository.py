@@ -33,6 +33,6 @@ class UserRepository:
     async def get_active_users(self, days: int = 30) -> list[User]:
         """활성 사용자 조회 (최근 로그인 기준)"""
         cutoff_date = datetime.now() - timedelta(days=days)
-        query = select(User).where(User.created_at >= cutoff_date)
+        query = select(User).where(User.last_login >= cutoff_date)
         result = await self.db.execute(query)
         return list(result.scalars().all())

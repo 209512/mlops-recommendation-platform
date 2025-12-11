@@ -1,14 +1,14 @@
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
     get_mlflow_service,
     get_monitoring_service,
     get_recommendation_service,
 )
-from app.infrastructure.database import get_db
+from app.infrastructure.database import get_async_db
 from app.schemas.recommendation import TrainingMetrics
 from app.services.mlflow.tracking import MLflowTrackingService
 from app.services.monitoring.prometheus import MLOpsMonitoring
@@ -22,7 +22,7 @@ router = APIRouter()
 async def train_model(
     background_tasks: BackgroundTasks,
     full_training: bool = False,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_async_db),
     mlflow: MLflowTrackingService = Depends(get_mlflow_service),
     monitoring: MLOpsMonitoring = Depends(get_monitoring_service),
 ) -> TrainingMetrics | dict[str, str]:
