@@ -12,6 +12,22 @@ on:
 jobs:
   comprehensive-analysis:
     runs-on: ubuntu-latest
+    env:
+      # 테스트용 환경 변수
+      ENVIRONMENT: "test"
+      DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+      REDIS_URL: "redis://localhost:6379/0"
+      MLFLOW_TRACKING_URI: "http://localhost:5001"
+      MLFLOW_EXPERIMENT_NAME: "quality-test-experiment"
+      SECRET_KEY: "test-secret-key-for-quality-only"
+      POSTGRES_PASSWORD: "test-password"
+      AWS_ACCESS_KEY_ID: "test-key"
+      AWS_SECRET_ACCESS_KEY: "test-secret"
+      AWS_REGION: "ap-northeast-2"
+      ECR_REGISTRY: "test-account.dkr.ecr.ap-northeast-2.amazonaws.com"
+      SONAR_HOST_URL: "http://localhost:9000"
+      SONAR_TOKEN: "test-sonar-token"
+
     steps:
     - uses: actions/checkout@v4
       with:
@@ -24,10 +40,10 @@ jobs:
 
     - name: Set up uv
       uses: astral-sh/setup-uv@v2
-      
+
     - name: Create virtual environment
       run: uv venv
-      
+
     - name: Install dependencies and deep scan tools
       run: uv pip install -e ".[dev]" semgrep radon mccabe
 
@@ -38,23 +54,23 @@ jobs:
       run: mypy . --ignore-missing-imports --strict
 
     - name: Run Ruff with all checks
-      run: |  
-        ruff check . --select ALL  
-        ruff format --check .  
+      run: |
+        ruff check . --select ALL
+        ruff format --check .
 
     - name: Run Pylint
       run: pylint app/ --output-format=text > pylint-report.txt || true
-      
+
     - name: Run tests with detailed coverage
-      run: |  
-        pytest tests/ --cov=app --cov-report=xml --cov-report=html --cov-fail-under=80  
-        coverage xml  
-        coverage html  
+      run: |
+        pytest tests/ --cov=app --cov-report=xml --cov-report=html --cov-fail-under=80
+        coverage xml
+        coverage html
 
     - name: Run Security Scans (Bandit, Safety, Semgrep)
-      run: |  
-        bandit -r app/ -f json -o bandit-report.json -ll  
-        safety check --json --output safety-report.json  
+      run: |
+        bandit -r app/ -f json -o bandit-report.json -ll
+        safety check --json --output safety-report.json
         semgrep --config=auto --json --output=semgrep-report.json app/ || true
 
     - name: Check for complex code (Radon)
@@ -71,11 +87,11 @@ jobs:
       if: always()
       with:
         name: quality-reports
-        path: |  
-          coverage.xml  
-          htmlcov/  
-          bandit-report.json  
-          safety-report.json  
+        path: |
+          coverage.xml
+          htmlcov/
+          bandit-report.json
+          safety-report.json
           semgrep-report.json
           pylint-report.txt
           radon-cc-report.txt
