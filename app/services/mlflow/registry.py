@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from mlflow.tracking import MlflowClient
+from mlflow import MlflowClient
 
 from app.core.config import settings
 
@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 class ModelRegistry:
     """MLflow 모델 레지스트리 관리자"""
 
-    def __init__(self) -> None:
-        self.client = MlflowClient()
+    def __init__(self, client: MlflowClient | None = None) -> None:
+        self.client = client or MlflowClient(tracking_uri=settings.mlflow_tracking_uri)
         self.registry_uri = settings.mlflow_tracking_uri
 
     def register_model(self, model_uri: str, name: str, description: str = "") -> dict[str, Any]:
