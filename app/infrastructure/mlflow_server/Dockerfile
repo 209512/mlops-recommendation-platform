@@ -21,4 +21,4 @@ EXPOSE 5001
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:5001/health || exit 1
 
-CMD ["sh", "-c", "mlflow server --host 0.0.0.0 --port 5001 --backend-store-uri ${MLFLOW_BACKEND_STORE_URI} --default-artifact-root ${MLFLOW_DEFAULT_ARTIFACT_ROOT}"]
+CMD ["sh", "-c", "mlflow server --host 0.0.0.0 --port 5001 --backend-store-uri ${MLFLOW_BACKEND_STORE_URI} --default-artifact-root ${MLFLOW_DEFAULT_ARTIFACT_ROOT} --serve-artifacts"]

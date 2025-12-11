@@ -57,8 +57,8 @@ def get_monitoring_service() -> Optional["MLOpsMonitoring"]:
         return None
 
 
-async def get_current_user_id(user_id: int) -> int:
-    """현재 사용자 ID 검증"""
-    if not user_id:
-        raise ValueError("User ID is required")
-    return user_id
+async def get_current_user_id() -> int:
+    """현재 사용자 ID 검증 - JWT에서 추출 필요"""
+    # TODO: JWT 토큰에서 user_id 추출 로직 구현
+    # 임시로 1을 반환 - 실제 구현 시 JWT 파싱 필요
+    return 1
