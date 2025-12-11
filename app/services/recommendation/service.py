@@ -82,8 +82,20 @@ class RecommendationService:
             if not model_bundle:
                 return []
 
+            # 사용자 ID를 행렬 인덱스로 변환
+            user_idx = model_bundle["user_to_idx"].get(user_id)
+            if user_idx is None:
+                return []
+
+            # 특정 사용자의 상호작용 데이터 추출
+            user_items = model_bundle["matrix"][user_idx]
+
             # ALS 추천 생성
-            recommended_ids, scores = self.trainer.recommend(user_id, model_bundle["matrix"], limit)
+            recommended_indices, scores = self.trainer.recommend(user_idx, user_items, limit)
+
+            # 인덱스를 실제 강의 ID로 변환
+            idx_to_lecture = {v: k for k, v in model_bundle["lecture_to_idx"].items()}
+            recommended_ids = [idx_to_lecture[idx] for idx in recommended_indices]
 
             # 강의 상세 정보 조회
             lectures = await self.lecture_repo.get_lectures_by_ids(recommended_ids)
