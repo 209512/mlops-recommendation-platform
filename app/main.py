@@ -2,6 +2,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import mlflow
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,13 +12,15 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 
 from app.api.middleware import LoggingMiddleware, MetricsMiddleware
+from app.api.v1.mlflow import router as mlflow_router
 from app.api.v1.monitoring import router as monitoring_router
 from app.api.v1.recommendations import router as recommendations_router
 from app.api.v1.training import router as training_router
 from app.core.config import settings
 from app.core.exception import MLOpsError
 from app.infrastructure.database import async_engine
-from app.infrastructure.redis import redis_client
+from app.infrastructure.redis import is_redis_healthy, redis_client
+from app.services.mlflow.tracking import get_mlflow_tracking_service
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """애플리케이션 생명주기 관리"""
     # Startup 로직
     logger.info("Starting MLOps Recommendation Platform...")
+
+    # MLflow 초기화
+    try:
+        mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+        mlflow.set_experiment(settings.mlflow_experiment_name)
+        logger.info(f"MLflow initialized with URI: {settings.mlflow_tracking_uri}")
+
+        # MLflow 서비스 테스트
+        mlflow_service = get_mlflow_tracking_service()
+        if mlflow_service.client:
+            logger.info("MLflow client connection established")
+        else:
+            logger.warning("MLflow client connection failed")
+    except Exception as e:
+        logger.error(f"MLflow initialization failed: {e}")
 
     try:
         # 데이터베이스 연결 확인
@@ -40,10 +58,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Redis 연결 확인
     try:
         if redis_client:
-            redis_client.ping()
-            logger.info("Redis connection established")
+            if is_redis_healthy():
+                logger.info("Redis connection established")
+            else:
+                logger.warning("Redis connection failed")
     except Exception as e:
-        logger.warning(f"Redis connection failed: {e}")
+        logger.warning(f"Redis connection check failed: {e}")
 
     # 모델 로딩 시도
     try:
@@ -59,6 +79,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown 로직
     logger.info("Shutting down MLOps Recommendation Platform...")
 
+    # MLflow 리소스 정리
+    try:
+        mlflow_service = get_mlflow_tracking_service()
+        mlflow_service.cleanup()
+        logger.info("MLflow resources cleaned up")
+    except Exception as e:
+        logger.warning(f"MLflow cleanup failed: {e}")
+
     try:
         await async_engine.dispose()
     except Exception as e:
@@ -73,80 +101,83 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("MLOps Recommendation Platform shut down complete")
 
 
-# FastAPI 앱 생성
-app = FastAPI(
-    title="MLOps Recommendation Platform",
-    description="FastAPI-based ALS recommendation system with MLOps",
-    version="0.1.0",
-    lifespan=lifespan,
-)
-
-# 미들웨어 설정
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.allowed_hosts,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=settings.allowed_hosts,
-)
-
-app.add_middleware(LoggingMiddleware)
-app.add_middleware(MetricsMiddleware)
-
-
-# 예외 핸들러
-@app.exception_handler(MLOpsError)
-async def mlops_exception_handler(request: Request, exc: MLOpsError) -> JSONResponse:
-    """MLOps 전용 예외 핸들러"""
-    return JSONResponse(
-        status_code=getattr(exc, "status_code", 500),
-        content={
-            "error": getattr(exc, "error_type", "MLOpsError"),
-            "message": str(exc),
-            "details": getattr(exc, "details", {}),
-        },
+def create_app() -> FastAPI:
+    """FastAPI 앱 팩토리 함수"""
+    # FastAPI 앱 생성
+    app = FastAPI(
+        title="MLOps Recommendation Platform",
+        description="FastAPI-based ALS recommendation system with MLOps",
+        version="0.1.0",
+        lifespan=lifespan,
     )
 
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """일반 예외 핸들러"""
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "InternalServerError",
-            "message": "An unexpected error occurred",
-        },
+    # 미들웨어 설정
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.allowed_hosts,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
-
-# 라우터 등록
-app.include_router(monitoring_router, prefix="/api/v1", tags=["monitoring"])
-app.include_router(recommendations_router, prefix="/api/v1", tags=["recommendations"])
-app.include_router(training_router, prefix="/api/v1", tags=["training"])
-
-
-# 엔드포인트
-@app.get("/metrics")
-async def metrics() -> Response:
-    """Prometheus 메트릭 노출"""
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST,
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.allowed_hosts,
     )
 
+    app.add_middleware(LoggingMiddleware)
+    app.add_middleware(MetricsMiddleware)
 
-@app.get("/health")
-async def health_check() -> dict[str, str]:
-    """헬스 체크"""
-    return {"status": "healthy", "service": "mlops-recommendation-platform"}
+    # 예외 핸들러
+    @app.exception_handler(MLOpsError)
+    async def mlops_exception_handler(request: Request, exc: MLOpsError) -> JSONResponse:
+        """MLOps 전용 예외 핸들러"""
+        return JSONResponse(
+            status_code=getattr(exc, "status_code", 500),
+            content={
+                "error": getattr(exc, "error_type", "MLOpsError"),
+                "message": str(exc),
+                "details": getattr(exc, "details", {}),
+            },
+        )
 
+    @app.exception_handler(Exception)
+    async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        """일반 예외 핸들러"""
+        logger.error(f"Unhandled exception: {exc}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "InternalServerError",
+                "message": "An unexpected error occurred",
+            },
+        )
+
+    # 라우터 등록
+    app.include_router(monitoring_router, prefix="/api/v1", tags=["monitoring"])
+    app.include_router(recommendations_router, prefix="/api/v1", tags=["recommendations"])
+    app.include_router(training_router, prefix="/api/v1", tags=["training"])
+    app.include_router(mlflow_router, prefix="/api/v1/mlflow", tags=["mlflow"])
+
+    # 엔드포인트
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        """Prometheus 메트릭 노출"""
+        return Response(
+            content=generate_latest(),
+            media_type=CONTENT_TYPE_LATEST,
+        )
+
+    @app.get("/health")
+    async def health_check() -> dict[str, str]:
+        """헬스 체크"""
+        return {"status": "healthy", "service": "mlops-recommendation-platform"}
+
+    return app
+
+
+# 전역 앱 인스턴스 (프로덕션용)
+app = create_app()
 
 if __name__ == "__main__":
     uvicorn.run(
