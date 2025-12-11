@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from app.services.mlflow.registry import ModelRegistry
@@ -32,6 +32,7 @@ class ParametersLogRequest(BaseModel):
 class ModelLogRequest(BaseModel):
     model_name: str = Field(..., min_length=1, description="Model name")
     model_type: str = Field(default="sklearn", description="Model type")
+    model_uri: str | None = Field(default=None, description="Model URI or path (optional)")
 
 
 class ModelRegisterRequest(BaseModel):
@@ -123,7 +124,13 @@ async def log_parameters(run_id: str, request: ParametersLogRequest) -> dict[str
 
 
 @router.post("/runs/{run_id}/model")
-async def log_model(run_id: str, request: ModelLogRequest) -> dict[str, Any]:
+async def log_model(
+    run_id: str,
+    model_file: UploadFile | None = File(None, description="Model file to upload"),
+    model_uri: str = Form(None, description="Model URI or path"),
+    model_name: str = Form(..., description="Model name"),
+    model_type: str = Form(default="sklearn", description="Model type"),
+) -> dict[str, Any]:
     """모델 로깅"""
     try:
         if not run_id or not run_id.strip():
@@ -133,13 +140,57 @@ async def log_model(run_id: str, request: ModelLogRequest) -> dict[str, Any]:
         if not service:
             raise HTTPException(status_code=503, detail="MLflow service unavailable")
 
+        # Determine model source
+        model_source = None
+        if model_file:
+            # Save uploaded file temporarily
+            import os
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pkl") as tmp_file:
+                content = await model_file.read()
+                tmp_file.write(content)
+                tmp_file_path = tmp_file.name
+
+            try:
+                # Load model from file based on type
+                if model_type == "sklearn":
+                    import pickle
+
+                    with open(tmp_file_path, "rb") as f:
+                        model_source = pickle.load(f)
+                elif model_type == "implicit":
+                    # For ALS models, load the saved model
+                    model_source = tmp_file_path
+                else:
+                    raise ValueError(f"Unsupported model type: {model_type}")
+            finally:
+                # Clean up temporary file
+                os.unlink(tmp_file_path)
+
+        elif model_uri:
+            # Use model URI directly
+            model_source = model_uri
+
+        else:
+            raise HTTPException(
+                status_code=400, detail="Either model_file or model_uri must be provided"
+            )
+
+        # Log the model
         success = service.log_model(
-            run_id=run_id, model=None, model_name=request.model_name, model_type=request.model_type
+            run_id=run_id, model=model_source, model_name=model_name, model_type=model_type
         )
+
         if success:
-            return {"status": "success"}
+            return {
+                "status": "success",
+                "message": f"Model '{model_name}' logged successfully",
+                "model_type": model_type,
+            }
         else:
             raise HTTPException(status_code=500, detail="Failed to log model")
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:

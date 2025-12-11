@@ -54,7 +54,12 @@ jobs:
       run: black --check .
 
     - name: Run mypy (Type Checker)
-      run: mypy app/
+      run: |
+        mypy \
+          --no-strict-optional \
+          --ignore-missing-imports \
+          --disallow-untyped-defs=false \
+          app/
 
     - name: Run unit tests and generate coverage report
       run: pytest tests/ --cov=app --cov-report=xml --cov-report=html

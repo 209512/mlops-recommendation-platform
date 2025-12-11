@@ -4,7 +4,6 @@ metadata:
   name: mlops-config
   namespace: mlops-recommendation
 data:
-  DATABASE_URL: "postgresql://username:password@postgres:5432/mlops_recommendation"
   REDIS_URL: "redis://redis:6379/0"
   MLFLOW_TRACKING_URI: "http://mlflow:5001"
   ALS_MODEL_VERSION: "v1"

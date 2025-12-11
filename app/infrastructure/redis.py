@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -26,19 +27,23 @@ class RedisClient:
     _client: BaseRedis | None = None
     _last_health_check: float = 0
     _health_check_interval: int = 30  # 30초마다 헬스 체크
+    _lock = threading.Lock()  # 스레드 세이프를 위한 클래스 락
 
     def __new__(cls) -> "RedisClient":
+        # Double-checked locking 패턴으로 스레드 세이프한 싱글톤 구현
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._client = redis.Redis(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                decode_responses=False,
-                socket_connect_timeout=5,
-                socket_timeout=5,
-                # retry_on_timeout=True,
-                health_check_interval=30,  # 커넥션 풀링 헬스 체크
-            )
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._client = redis.Redis(
+                        host=settings.redis_host,
+                        port=settings.redis_port,
+                        decode_responses=False,
+                        socket_connect_timeout=5,
+                        socket_timeout=5,
+                        retry_on_timeout=True,  # 타임아웃 시 재시도 활성화
+                        health_check_interval=30,  # 커넥션 풀링 헬스 체크
+                    )
         return cls._instance
 
     def get_client(self) -> BaseRedis:
