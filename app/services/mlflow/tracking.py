@@ -1,4 +1,6 @@
 import logging
+import time
+from contextlib import contextmanager
 from typing import Any, cast
 
 import mlflow
@@ -20,6 +22,15 @@ mlflow_run_duration = Histogram(
 
 mlflow_active_runs = Gauge("mlflow_active_runs", "Number of active MLflow runs")
 
+# 추가 메트릭
+mlflow_operations_total = Counter(
+    "mlflow_operations_total", "Total MLflow operations", ["operation", "status"]
+)
+
+mlflow_model_logging_total = Counter(
+    "mlflow_model_logging_total", "Total model logging operations", ["model_type", "status"]
+)
+
 
 class MLflowTrackingService:
     """MLflow 추적 서비스 - 실험 관리 및 모델 버전 관리"""
@@ -36,8 +47,22 @@ class MLflowTrackingService:
         self.experiment_name: str = settings.mlflow_experiment_name
         self.client: MlflowClient | None = client
 
+        # MLflow 2.8+ 비동기 로깅 활성화
+        self._enable_async_logging()
+
         if client is None:
             self._initialize_client()
+
+    def _enable_async_logging(self) -> None:
+        """MLflow 2.8+ 비동기 로깅 활성화"""
+        try:
+            # MLflow 2.8+ 비동기 로깅 설정
+            from mlflow.config import enable_async_logging
+
+            enable_async_logging(True)  # type: ignore
+            logger.info("MLflow async logging enabled")
+        except Exception as e:
+            logger.warning(f"Failed to enable async logging: {e}")
 
     def _initialize_client(self) -> None:
         """MLflow 클라이언트 초기화"""
@@ -54,27 +79,47 @@ class MLflowTrackingService:
             self._initialize_client()
         return self.client is not None
 
+    @contextmanager
+    def _track_operation(self, operation: str) -> Any:
+        """Prometheus 메트릭 추적 컨텍스트"""
+        start_time = time.time()
+        try:
+            yield
+            mlflow_operations_total.labels(operation=operation, status="success").inc()
+        except Exception:
+            mlflow_operations_total.labels(operation=operation, status="error").inc()
+            raise
+        finally:
+            duration = time.time() - start_time
+            logger.debug(f"Operation {operation} took {duration:.2f}s")
+
     def create_experiment(self, name: str, tags: dict[str, str] | None = None) -> str | None:
         """실험 생성"""
-        if not self._ensure_client():
-            return None
+        with self._track_operation("create_experiment"):
+            if not self._ensure_client():
+                mlflow_experiment_counter.labels(status="error").inc()
+                return None
 
-        assert self.client is not None  # mypy를 위한 assertion
-        try:
-            experiment = self.client.get_experiment_by_name(name)
-            if experiment is None:
-                experiment_id = self.client.create_experiment(name, tags=tags or {})
-                if experiment_id is not None:
-                    logger.info(f"Created experiment: {name} with ID: {experiment_id}")
-                    return experiment_id
+            assert self.client is not None  # mypy를 위한 assertion
+            try:
+                experiment = self.client.get_experiment_by_name(name)
+                if experiment is None:
+                    experiment_id = self.client.create_experiment(name, tags=tags or {})
+                    if experiment_id is not None:
+                        logger.info(f"Created experiment: {name} with ID: {experiment_id}")
+                        mlflow_experiment_counter.labels(status="created").inc()
+                        return experiment_id
+                    else:
+                        mlflow_experiment_counter.labels(status="error").inc()
+                        return None
                 else:
-                    return None
-            else:
-                logger.info(f"Experiment {name} already exists")
-                return cast(str, experiment.experiment_id)
-        except Exception as e:
-            logger.error(f"Failed to create experiment {name}: {e}")
-            return None
+                    logger.info(f"Experiment {name} already exists")
+                    mlflow_experiment_counter.labels(status="existing").inc()
+                    return cast(str, experiment.experiment_id)
+            except Exception as e:
+                logger.error(f"Failed to create experiment {name}: {e}")
+                mlflow_experiment_counter.labels(status="error").inc()
+                return None
 
     def start_run(
         self,
@@ -83,141 +128,183 @@ class MLflowTrackingService:
         tags: dict[str, str] | None = None,
     ) -> str | None:
         """실행 시작"""
-        if not self._ensure_client():
-            return None
+        with self._track_operation("start_run"):
+            if not self._ensure_client():
+                return None
 
-        assert self.client is not None  # mypy를 위한 assertion
-        try:
-            if experiment_name:
-                experiment = self.client.get_experiment_by_name(experiment_name)
-                if experiment is None:
-                    experiment_id = self.client.create_experiment(experiment_name, tags=tags or {})
-                    if experiment_id is None:
-                        return None
+            assert self.client is not None  # mypy를 위한 assertion
+            try:
+                if experiment_name:
+                    experiment = self.client.get_experiment_by_name(experiment_name)
+                    if experiment is None:
+                        experiment_id = self.client.create_experiment(
+                            experiment_name, tags=tags or {}
+                        )
+                        if experiment_id is None:
+                            return None
+                    else:
+                        experiment_id = experiment.experiment_id
                 else:
-                    experiment_id = experiment.experiment_id
-            else:
-                # 기본 실험 사용
-                experiment_id = "0"
+                    # 기본 실험 사용
+                    experiment_id = "0"
 
-            run = self.client.create_run(experiment_id=experiment_id, run_name=run_name, tags=tags)
-            logger.info(f"Started run: {run.info.run_id}")
-            return cast(str, run.info.run_id)
+                run = self.client.create_run(
+                    experiment_id=experiment_id, run_name=run_name, tags=tags
+                )
+                logger.info(f"Started run: {run.info.run_id}")
+
+                # 활성 run 수 업데이트
+                self._update_active_runs_count()
+
+                return cast(str, run.info.run_id)
+            except Exception as e:
+                logger.error(f"Failed to start run: {e}")
+                return None
+
+    def _update_active_runs_count(self) -> None:
+        """활성 run 수 업데이트"""
+        try:
+            if self.client:
+                active_runs = self.client.search_runs(
+                    experiment_ids=["0"], filter_string="status = 'RUNNING'"
+                )
+                mlflow_active_runs.set(len(active_runs))
         except Exception as e:
-            logger.error(f"Failed to start run: {e}")
-            return None
+            logger.warning(f"Failed to update active runs count: {e}")
 
     def log_parameters(self, run_id: str, parameters: dict[str, Any]) -> bool:
         """파라미터 로깅"""
-        if not self._ensure_client():
-            return False
+        with self._track_operation("log_parameters"):
+            if not self._ensure_client():
+                return False
 
-        assert self.client is not None
-        try:
-            for key, value in parameters.items():
-                self.client.log_param(run_id, key, value)
-            logger.info(f"Logged {len(parameters)} parameters to run {run_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to log parameters: {e}")
-            return False
+            assert self.client is not None
+            try:
+                for key, value in parameters.items():
+                    self.client.log_param(run_id, key, value)
+                logger.info(f"Logged {len(parameters)} parameters to run {run_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to log parameters: {e}")
+                return False
 
     def log_metrics(self, run_id: str, metrics: dict[str, float], step: int | None = None) -> bool:
         """메트릭 로깅"""
-        if not self._ensure_client():
-            return False
+        with self._track_operation("log_metrics"):
+            if not self._ensure_client():
+                return False
 
-        assert self.client is not None
-        try:
-            for key, value in metrics.items():
-                self.client.log_metric(run_id, key, value, step=step)
-            logger.info(f"Logged {len(metrics)} metrics to run {run_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to log metrics: {e}")
-            return False
+            assert self.client is not None
+            try:
+                for key, value in metrics.items():
+                    self.client.log_metric(run_id, key, value, step=step)
+                logger.info(f"Logged {len(metrics)} metrics to run {run_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to log metrics: {e}")
+                return False
 
     def log_model(
         self, run_id: str, model: Any, model_name: str, model_type: str = "sklearn"
     ) -> bool:
         """모델 로깅"""
-        if not self._ensure_client():
-            return False
-
-        try:
-            if model_type == "sklearn":
-                # run_id를 사용하여 특정 실행에 모델 로깅
-                with mlflow.start_run(run_id=run_id):
-                    sklearn.log_model(model, model_name)
-            else:
-                logger.warning(f"Unsupported model type: {model_type}")
+        with self._track_operation("log_model"):
+            if not self._ensure_client():
+                mlflow_model_logging_total.labels(model_type=model_type, status="error").inc()
                 return False
 
-            logger.info(f"Logged model {model_name} to run {run_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to log model to run {run_id}: {e}")
-            return False
+            try:
+                if model_type == "sklearn":
+                    # run_id를 사용하여 특정 실행에 모델 로깅
+                    with mlflow.start_run(run_id=run_id):
+                        sklearn.log_model(model, model_name)
+                else:
+                    logger.warning(f"Unsupported model type: {model_type}")
+                    mlflow_model_logging_total.labels(model_type=model_type, status="error").inc()
+                    return False
+
+                logger.info(f"Logged model {model_name} to run {run_id}")
+                mlflow_model_logging_total.labels(model_type=model_type, status="success").inc()
+                return True
+            except Exception as e:
+                logger.error(f"Failed to log model to run {run_id}: {e}")
+                mlflow_model_logging_total.labels(model_type=model_type, status="error").inc()
+                return False
 
     def log_artifact(self, run_id: str, local_path: str, artifact_path: str | None = None) -> bool:
         """아티팩트 로깅"""
-        if not self._ensure_client():
-            return False
+        with self._track_operation("log_artifact"):
+            if not self._ensure_client():
+                return False
 
-        assert self.client is not None
-        try:
-            self.client.log_artifact(run_id, local_path, artifact_path)
-            logger.info(f"Logged artifact {local_path} to run {run_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to log artifact to run {run_id}: {e}")
-            return False
+            assert self.client is not None
+            try:
+                self.client.log_artifact(run_id, local_path, artifact_path)
+                logger.info(f"Logged artifact {local_path} to run {run_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to log artifact to run {run_id}: {e}")
+                return False
 
     def end_run(self, run_id: str, status: str = "FINISHED") -> bool:
         """실행 종료"""
-        if not self._ensure_client():
-            return False
+        with self._track_operation("end_run"):
+            if not self._ensure_client():
+                return False
 
-        assert self.client is not None
-        try:
-            self.client.set_terminated(run_id, status)
-            logger.info(f"Ended run {run_id} with status {status}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to end run {run_id}: {e}")
-            return False
+            assert self.client is not None
+            try:
+                # Run 시작 시간 가져오기
+                run_info = self.client.get_run(run_id).info
+                run_start_time = run_info.start_time / 1000  # 밀리초를 초로 변환
+
+                self.client.set_terminated(run_id, status)
+                logger.info(f"Ended run {run_id} with status {status}")
+
+                # 실행 시간 기록
+                duration = time.time() - run_start_time
+                mlflow_run_duration.labels(experiment_name=run_info.experiment_id).observe(duration)
+
+                # 활성 run 수 업데이트
+                self._update_active_runs_count()
+
+                return True
+            except Exception as e:
+                logger.error(f"Failed to end run {run_id}: {e}")
+                return False
 
     def get_run_history(self, experiment_name: str | None = None) -> dict[str, Any]:
         """실행 기록 조회"""
-        if not self._ensure_client():
-            return {"runs": []}
+        with self._track_operation("get_run_history"):
+            if not self._ensure_client():
+                return {"runs": []}
 
-        assert self.client is not None
-        try:
-            if experiment_name:
-                experiment = self.client.get_experiment_by_name(experiment_name)
-                if experiment is None:
-                    return {"runs": []}
-                runs = self.client.search_runs(experiment_ids=[experiment.experiment_id])
-            else:
-                # 모든 실험 조회 (기본 실험 포함)
-                runs = self.client.search_runs(experiment_ids=["0"])
+            assert self.client is not None
+            try:
+                if experiment_name:
+                    experiment = self.client.get_experiment_by_name(experiment_name)
+                    if experiment is None:
+                        return {"runs": []}
+                    runs = self.client.search_runs(experiment_ids=[experiment.experiment_id])
+                else:
+                    # 모든 실험 조회 (기본 실험 포함)
+                    runs = self.client.search_runs(experiment_ids=["0"])
 
-            return {
-                "runs": [
-                    {
-                        "run_id": run.info.run_id,
-                        "status": run.info.status,
-                        "start_time": run.info.start_time,
-                        "end_time": run.info.end_time,
-                        "metrics": run.data.metrics,
-                    }
-                    for run in runs
-                ]
-            }
-        except Exception as e:
-            logger.error(f"Failed to get run history: {e}")
-            return {"runs": []}
+                return {
+                    "runs": [
+                        {
+                            "run_id": run.info.run_id,
+                            "status": run.info.status,
+                            "start_time": run.info.start_time,
+                            "end_time": run.info.end_time,
+                            "metrics": run.data.metrics,
+                        }
+                        for run in runs
+                    ]
+                }
+            except Exception as e:
+                logger.error(f"Failed to get run history: {e}")
+                return {"runs": []}
 
     def register_model(
         self,
@@ -226,44 +313,47 @@ class MLflowTrackingService:
         description: str = "",
     ) -> str | None:
         """모델 등록"""
-        if not self._ensure_client():
-            return None
+        with self._track_operation("register_model"):
+            if not self._ensure_client():
+                return None
 
-        assert self.client is not None
-        try:
-            model_uri = f"runs:/{run_id}/{model_name}"
-            model_version = self.client.create_model_version(
-                name=model_name,
-                source=model_uri,
-                run_id=run_id,
-                description=description,
-            )
-            return model_version.version
-        except Exception as e:
-            logger.error(f"Failed to register model: {e}")
-            return None
+            assert self.client is not None
+            try:
+                model_uri = f"runs:/{run_id}/{model_name}"
+                model_version = self.client.create_model_version(
+                    name=model_name,
+                    source=model_uri,
+                    run_id=run_id,
+                    description=description,
+                )
+                return model_version.version
+            except Exception as e:
+                logger.error(f"Failed to register model: {e}")
+                return None
 
     def cleanup(self) -> None:
         """리소스 정리"""
-        if not self._ensure_client():
-            logger.warning("MLflow client not initialized, skipping cleanup")
-            return
+        with self._track_operation("cleanup"):
+            if not self._ensure_client():
+                logger.warning("MLflow client not initialized, skipping cleanup")
+                return
 
-        assert self.client is not None
-        try:
-            experiment = self.client.get_experiment_by_name(self.experiment_name)
-            if experiment:
-                active_runs = self.client.search_runs(
-                    experiment_ids=[experiment.experiment_id], filter_string="status = 'RUNNING'"
-                )
+            assert self.client is not None
+            try:
+                experiment = self.client.get_experiment_by_name(self.experiment_name)
+                if experiment:
+                    active_runs = self.client.search_runs(
+                        experiment_ids=[experiment.experiment_id],
+                        filter_string="status = 'RUNNING'",
+                    )
 
-                for run in active_runs:
-                    self.client.set_terminated(run.info.run_id, "FAILED")
+                    for run in active_runs:
+                        self.client.set_terminated(run.info.run_id, "FAILED")
 
-            logger.info("Cleaned up MLflow resources")
+                logger.info("Cleaned up MLflow resources")
 
-        except Exception as e:
-            logger.error(f"Failed to cleanup resources: {e}")
+            except Exception as e:
+                logger.error(f"Failed to cleanup resources: {e}")
 
 
 def get_mlflow_tracking_service() -> MLflowTrackingService:

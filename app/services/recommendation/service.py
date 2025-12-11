@@ -100,7 +100,9 @@ class RecommendationService:
             # 강의 상세 정보 조회
             lectures = await self.lecture_repo.get_lectures_by_ids(recommended_ids)
 
-            return self._convert_to_recommendations(lectures, scores)
+            return self._convert_to_recommendations(
+                lectures, scores.tolist() if hasattr(scores, "tolist") else list(scores)
+            )
 
         except Exception as e:
             logger.error(f"[RECOMMENDATION] ALS recommendation failed: {e}", exc_info=True)

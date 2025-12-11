@@ -1,6 +1,7 @@
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from scipy.sparse import csr_matrix
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
@@ -49,13 +50,17 @@ async def train_model(
             if not matrix_bundle:
                 raise HTTPException(status_code=400, detail="No training data available")
 
-            success = trainer.train_incremental_model(matrix_bundle)
+            result = trainer.train_incremental_model(
+                new_interactions=cast(csr_matrix, matrix_bundle["matrix"]),
+                new_users=cast(list[int], matrix_bundle["users"]),
+                new_lectures=cast(list[int], matrix_bundle["lectures"]),
+            )
 
-            if success:
+            if result["status"] == "success":
                 # MLflow에 기록
                 mlflow.log_metrics("incremental_training", {"success": 1})
                 return TrainingMetrics(
-                    training_time=0.0,
+                    training_time=result.get("training_time", 0.0),
                     accuracy=0.0,
                     precision=0.0,
                     recall=0.0,
@@ -82,7 +87,7 @@ async def get_training_status(
         if mlflow.client is None:
             return {"status": "no_training", "message": "MLflow client not available"}
 
-            # 기존 실험 정보 조회
+        # 기존 실험 정보 조회
         experiment = mlflow.client.get_experiment_by_name(mlflow.experiment_name)
         if not experiment:
             return {"status": "no_training", "message": "No training found"}

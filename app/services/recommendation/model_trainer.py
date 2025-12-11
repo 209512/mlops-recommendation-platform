@@ -1,9 +1,13 @@
+import json
 import logging
-import pickle
 import time
 from typing import Any, TypedDict
 
 import implicit
+import mlflow
+import mlflow.pyfunc
+import numpy as np
+from mlflow.pyfunc.model import PythonModel
 from scipy.sparse import csr_matrix
 
 from app.infrastructure.redis import get_redis_client
@@ -22,11 +26,86 @@ class ModelBundle(TypedDict):
     model: implicit.als.AlternatingLeastSquares
     user_to_idx: dict[int, int]
     lecture_to_idx: dict[int, int]
+    idx_to_lecture: dict[int, int]
     users: list[int]
     lectures: list[int]
     matrix: csr_matrix
     last_trained_at: float
     training_time: float | None
+
+
+class ALSModelWrapper(PythonModel):
+    """ALS 모델을 위한 MLflow PythonModel 래퍼"""
+
+    def __init__(
+        self,
+        model: implicit.als.AlternatingLeastSquares,
+        user_to_idx: dict[int, int],
+        lecture_to_idx: dict[int, int],
+        idx_to_lecture: dict[int, int],
+    ):
+        self.model = model
+        self.user_to_idx = user_to_idx
+        self.lecture_to_idx = lecture_to_idx
+        self.idx_to_lecture = idx_to_lecture
+
+    def load_context(self, context: Any) -> None:
+        """모델 로딩 시 호출되는 메서드"""
+        pass
+
+    def predict(
+        self,
+        context: Any,
+        model_input: dict[str, Any] | list[int],
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        추천 예측 수행
+
+        Args:
+            model_input: {'user_id': int, 'limit': int} 또는 [user_id, limit]
+
+        Returns:
+            {'lecture_ids': list[int], 'scores': list[float]}
+        """
+        try:
+            # 입력 파싱
+            if isinstance(model_input, dict):
+                user_id = model_input.get("user_id")
+                limit = model_input.get("limit", 10)
+            elif isinstance(model_input, list) and len(model_input) >= 2:
+                user_id, limit = model_input[0], model_input[1]
+            else:
+                raise ValueError("Invalid input format")
+
+            # 사용자 ID를 인덱스로 변환
+            if user_id is None:
+                raise ValueError("user_id is required")
+            user_idx = self.user_to_idx.get(int(user_id))
+            if user_idx is None:
+                logger.warning(f"User {user_id} not found in model")
+                return {"lecture_ids": [], "scores": []}
+
+            # ALS 추천 생성
+            user_items: csr_matrix = csr_matrix(
+                ([1], ([0], [user_idx])), shape=(1, len(self.lecture_to_idx))
+            )
+
+            recommended_indices, scores = self.model.recommend(
+                user_idx, user_items, N=limit, filter_already_liked_items=True
+            )
+
+            # 인덱스를 실제 강의 ID로 변환
+            lecture_ids = [self.idx_to_lecture[idx] for idx in recommended_indices]
+
+            return {
+                "lecture_ids": lecture_ids,
+                "scores": scores.tolist() if hasattr(scores, "tolist") else list(scores),
+            }
+
+        except Exception as e:
+            logger.error(f"Prediction failed: {e}")
+            return {"lecture_ids": [], "scores": []}
 
 
 class ALSTrainer:
@@ -49,27 +128,30 @@ class ALSTrainer:
             matrix = matrix_bundle["matrix"]
             users = matrix_bundle["users"]
             lectures = matrix_bundle["lectures"]
+            user_to_idx = matrix_bundle["user_to_idx"]
+            lecture_to_idx = matrix_bundle["lecture_to_idx"]
 
-            # ALS 모델 생성 및 학습
+            # 역매핑 딕셔너리 생성
+            idx_to_lecture = {v: k for k, v in lecture_to_idx.items()}
+
+            # ALS 모델 학습
+            start_time = time.time()
             self.model = implicit.als.AlternatingLeastSquares(
                 factors=ALS_PARAMS.factors,
-                regularization=ALS_PARAMS.regularization,
                 iterations=ALS_PARAMS.iterations,
-                calculate_training_loss=ALS_PARAMS.calculate_training_loss,
-                use_gpu=False,  # CPU 버전으로 구현
+                regularization=ALS_PARAMS.regularization,
+                random_state=42,
             )
 
-            start_time = time.time()
-            self.model.fit(matrix, show_progress=False)
+            self.model.fit(matrix)
             training_time = time.time() - start_time
-
-            logger.info(f"[TRAINER] Model training completed in {training_time:.2f} seconds")
 
             # 모델 번들 생성
             model_bundle: ModelBundle = {
                 "model": self.model,
-                "user_to_idx": {user: idx for idx, user in enumerate(users)},
-                "lecture_to_idx": {lecture: idx for idx, lecture in enumerate(lectures)},
+                "user_to_idx": user_to_idx,
+                "lecture_to_idx": lecture_to_idx,
+                "idx_to_lecture": idx_to_lecture,
                 "users": users,
                 "lectures": lectures,
                 "matrix": matrix,
@@ -77,59 +159,135 @@ class ALSTrainer:
                 "training_time": training_time,
             }
 
-            # 저장
-            return self._save_model(model_bundle)
+            # MLflow에 모델 저장
+            success = self._save_model_to_mlflow(model_bundle)
+
+            return success
 
         except Exception as e:
-            logger.error(f"[TRAINER] Model training failed: {e}", exc_info=True)
+            logger.error(f"[TRAINER] Training failed: {e}", exc_info=True)
             return False
+        finally:
+            self._release_lock(lock_key)
+
+    def train_incremental_model(
+        self,
+        new_interactions: csr_matrix,
+        new_users: list[int] | None = None,
+        new_lectures: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """실제 증분 학습 구현"""
+        try:
+            # 기존 모델 로드
+            existing_bundle = self.load_model()
+            if not existing_bundle:
+                raise ValueError("No existing model found")
+
+            existing_model = existing_bundle["model"]
+            existing_user_to_idx = existing_bundle["user_to_idx"]
+            existing_lecture_to_idx = existing_bundle["lecture_to_idx"]
+
+            start_time = time.time()
+
+            # 새 사용자 증분 학습
+            if new_users:
+                new_user_indices = [
+                    existing_user_to_idx.get(uid, -1)
+                    for uid in new_users
+                    if uid in existing_user_to_idx
+                ]
+                if new_user_indices:
+                    # 새 사용자들의 상호작용 데이터 추출
+                    user_data = new_interactions[
+                        [i for i, uid in enumerate(new_users) if uid in existing_user_to_idx]
+                    ]
+                    existing_model.partial_fit_users(new_user_indices, user_data)
+
+                    # 새 강의 증분 학습
+            if new_lectures:
+                new_lecture_indices = [
+                    existing_lecture_to_idx.get(lid, -1)
+                    for lid in new_lectures
+                    if lid in existing_lecture_to_idx
+                ]
+                if new_lecture_indices:
+                    # 새 강의들의 상호작용 데이터 (전치)
+                    lecture_data = new_interactions.T[
+                        [i for i, lid in enumerate(new_lectures) if lid in existing_lecture_to_idx]
+                    ]
+                    existing_model.partial_fit_items(new_lecture_indices, lecture_data)
+
+            training_time = time.time() - start_time
+
+            # 기존 모델 업데이트
+            self.model = existing_model
+
+            # 메타데이터만 업데이트 (매핑 정보 변경 시)
+            updated_bundle = existing_bundle.copy()
+            updated_bundle["last_trained_at"] = time.time()
+            updated_bundle["training_time"] = training_time
+
+            # MLflow에 새 버전으로 저장
+            success = self._save_model_to_mlflow(updated_bundle)
+
+            return {
+                "status": "success" if success else "error",
+                "message": "Incremental training completed" if success else "Failed to save model",
+                "training_time": training_time,
+            }
+
+        except Exception as e:
+            logger.error(f"[TRAINER] Incremental training failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def recommend(
+        self, user_idx: int, user_items: csr_matrix, limit: int = 10
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """추천 생성"""
+        if self.model is None:
+            raise RuntimeError("Model not trained")
+
+        recommended_indices, scores = self.model.recommend(
+            user_idx, user_items, N=limit, filter_already_liked_items=True
+        )
+
+        return recommended_indices, scores
 
     def load_model(self) -> ModelBundle | None:
-        """저장된 모델 로드"""
+        """모델 로드"""
         try:
-            serialized = self.redis_client.get(f"als_model_{MODEL_VERSION}")
-            if not serialized:
+            # MLflow에서 최신 모델 로드
+            model_uri = "models:/als_recommendation_model/latest"  # 직접 URI 사용
+
+            # MLflow 모델 로드
+            loaded_model = mlflow.pyfunc.load_model(model_uri)
+            pyfunc_model = loaded_model._model_impl.python_model
+
+            # 메타데이터 로드
+            metadata = self._load_metadata()
+            if not metadata:
+                logger.warning("[TRAINER] No metadata found")
                 return None
 
-            model_bundle = pickle.loads(serialized)
+            # 모델 번들 재구성
+            model_bundle: ModelBundle = {
+                "model": pyfunc_model.model,
+                "user_to_idx": metadata["user_to_idx"],
+                "lecture_to_idx": metadata["lecture_to_idx"],
+                "idx_to_lecture": metadata["idx_to_lecture"],
+                "users": metadata["users"],
+                "lectures": metadata["lectures"],
+                "matrix": metadata["matrix"],
+                "last_trained_at": metadata["last_trained_at"],
+                "training_time": metadata["training_time"],
+            }
 
-            # TypedDict 타입 변환으로 MyPy 오류 해결
-            return ModelBundle(
-                model=model_bundle["model"],
-                user_to_idx=model_bundle["user_to_idx"],
-                lecture_to_idx=model_bundle["lecture_to_idx"],
-                users=model_bundle["users"],
-                lectures=model_bundle["lectures"],
-                matrix=model_bundle["matrix"],
-                last_trained_at=model_bundle["last_trained_at"],
-                training_time=model_bundle.get("training_time"),
-            )
+            self.model = pyfunc_model.model
+            return model_bundle
+
         except Exception as e:
             logger.error(f"[TRAINER] Failed to load model: {e}", exc_info=True)
             return None
-
-    def recommend(
-        self, user_id: int, user_items: csr_matrix, n: int = 10
-    ) -> tuple[list[int], list[float]]:
-        """사용자에게 아이템 추천"""
-        if not self.model:
-            return [], []
-
-        ids, scores = self.model.recommend(user_id, user_items, n=n)
-        return ids, scores.tolist()
-
-    def train_incremental_model(self, matrix_bundle: dict[str, Any]) -> bool:
-        """증분 모델 학습"""
-        try:
-            if not self.model:
-                return self.train_model(matrix_bundle)
-
-            matrix = matrix_bundle["matrix"]
-            self.model.fit(matrix, show_progress=False)
-            return True
-        except Exception as e:
-            logger.error(f"[TRAINER] Incremental training failed: {e}")
-            return False
 
     def get_model_info(self) -> dict[str, Any]:
         """모델 정보 조회"""
@@ -158,12 +316,84 @@ class ALSTrainer:
             time.sleep(0.1)
         return False
 
-    def _save_model(self, model_bundle: ModelBundle) -> bool:
-        """모델 저장"""
+    def _release_lock(self, lock_key: str) -> None:
+        """분산 락 해제"""
+        self.redis_client.delete(lock_key)
+
+    def _save_model_to_mlflow(self, model_bundle: ModelBundle) -> bool:
+        """MLflow에 모델 저장"""
         try:
-            serialized = pickle.dumps(model_bundle)
-            self.redis_client.set(f"als_model_{MODEL_VERSION}", serialized, ex=86400)  # 24시간 만료
-            return True
+            # 모델 래퍼 생성
+            wrapper = ALSModelWrapper(
+                model=model_bundle["model"],
+                user_to_idx=model_bundle["user_to_idx"],
+                lecture_to_idx=model_bundle["lecture_to_idx"],
+                idx_to_lecture=model_bundle["idx_to_lecture"],
+            )
+
+            # MLflow에 모델 로깅
+            with mlflow.start_run():
+                # 모델 로깅
+                model_info = mlflow.pyfunc.log_model(
+                    artifact_path="model",
+                    python_model=wrapper,
+                    registered_model_name="als_recommendation_model",
+                )
+
+                # 파라미터 로깅
+                mlflow.log_params(
+                    {
+                        "factors": ALS_PARAMS.factors,
+                        "iterations": ALS_PARAMS.iterations,
+                        "user_count": len(model_bundle["users"]),
+                        "lecture_count": len(model_bundle["lectures"]),
+                    }
+                )
+
+                # 메트릭 로깅
+                mlflow.log_metrics(
+                    {
+                        "training_time": model_bundle["training_time"] or 0,
+                    }
+                )
+
+                # 메타데이터를 Redis에 저장
+                metadata = {
+                    "user_to_idx": model_bundle["user_to_idx"],
+                    "lecture_to_idx": model_bundle["lecture_to_idx"],
+                    "idx_to_lecture": model_bundle["idx_to_lecture"],
+                    "users": model_bundle["users"],
+                    "lectures": model_bundle["lectures"],
+                    "matrix": model_bundle["matrix"],
+                    "last_trained_at": model_bundle["last_trained_at"],
+                    "training_time": model_bundle["training_time"],
+                    "model_version": model_info.model_version,
+                }
+                self._save_metadata(metadata)
+
+                logger.info(
+                    f"[TRAINER] Model saved to MLflow with version {model_info.model_version}"
+                )
+                return True
+
         except Exception as e:
-            logger.error(f"[TRAINER] Failed to save model: {e}", exc_info=True)
+            logger.error(f"[TRAINER] Failed to save model to MLflow: {e}", exc_info=True)
             return False
+
+    def _save_metadata(self, metadata: dict[str, Any]) -> None:
+        """메타데이터를 Redis에 저장"""
+
+        metadata_json = json.dumps(metadata, default=str)
+        self.redis_client.set(f"als_metadata_{MODEL_VERSION}", metadata_json, ex=86400)
+
+    def _load_metadata(self) -> dict[str, Any] | None:
+        """Redis에서 메타데이터 로드"""
+        try:
+            metadata_json = self.redis_client.get(f"als_metadata_{MODEL_VERSION}")
+            if not metadata_json:
+                return None
+            result: dict[str, Any] = json.loads(metadata_json)
+            return result
+        except Exception as e:
+            logger.error(f"[TRAINER] Failed to load metadata: {e}")
+            return None

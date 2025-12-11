@@ -29,6 +29,7 @@ def train_als_model(
     experiment_name: str = "recommendation_experiments",
 ) -> dict[str, Any]:
     """ALS 모델 학습 Celery 태스크"""
+    run_id = None
     try:
         # 데이터 로더 초기를 위한 비동기 컨텍스트 사용
         async def _train_model() -> dict[str, Any]:
@@ -85,22 +86,36 @@ def train_als_model(
             run_id = mlflow_service.start_run(run_name=f"{model_name}_{datetime.now().isoformat()}")
 
             if run_id:
-                # 모델 로깅 (run_id와 model_name 파라미터 사용)
-                model_info = mlflow_service.log_model(
-                    run_id=run_id, model=als_model, model_name=model_name, model_type="sklearn"
-                )
+                try:
+                    # 모델 로깅 (run_id와 model_name 파라미터 사용)
+                    model_info = mlflow_service.log_model(
+                        run_id=run_id, model=als_model, model_name=model_name, model_type="sklearn"
+                    )
 
-                # run_id 추출 (bool 타입 체크)
-                final_run_id = run_id if isinstance(run_id, str) else ""
+                    # run 종료 - 성공 상태로
+                    mlflow_service.end_run(run_id=run_id, status="FINISHED")
+                    logger.info(f"MLflow run {run_id} finished successfully")
 
-                return {
-                    "status": "success",
-                    "model_name": model_name,
-                    "experiment_id": experiment_id,
-                    "run_id": final_run_id,
-                    "model_info": model_info,  # model_info를 반환값에 포함
-                    "experiment": experiment_name,
-                }
+                    # run_id 추출 (bool 타입 체크)
+                    final_run_id = run_id if isinstance(run_id, str) else ""
+
+                    return {
+                        "status": "success",
+                        "model_name": model_name,
+                        "experiment_id": experiment_id,
+                        "run_id": final_run_id,
+                        "model_info": model_info,  # model_info를 반환값에 포함
+                        "experiment": experiment_name,
+                    }
+                except Exception as e:
+                    # 모델 로깅 중 에러 발생 시 run을 FAILED 상태로 종료
+                    if run_id:
+                        try:
+                            mlflow_service.end_run(run_id=run_id, status="FAILED")
+                            logger.error(f"MLflow run {run_id} failed: {str(e)}")
+                        except Exception as end_error:
+                            logger.error(f"Failed to end MLflow run {run_id}: {str(end_error)}")
+                    raise
             else:
                 return {
                     "status": "error",
@@ -115,6 +130,14 @@ def train_als_model(
             }
 
     except Exception as e:
+        # 최상위 예외 처리 - run이 시작된 경우 FAILED 상태로 종료
+        if run_id and mlflow_service:
+            try:
+                mlflow_service.end_run(run_id=run_id, status="FAILED")
+                logger.error(f"MLflow run {run_id} failed due to exception: {str(e)}")
+            except Exception as end_error:
+                logger.error(f"Failed to end MLflow run {run_id}: {str(end_error)}")
+
         logger.error(f"Failed to train ALS model: {str(e)}")
         return {
             "status": "error",
