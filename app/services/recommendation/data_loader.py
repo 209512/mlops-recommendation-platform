@@ -178,6 +178,7 @@ async def _build_user_item_matrix(
         확장된 매트릭스 번들 또는 None (상호작용이 없는 경우)
     """
     logger.info(f"[DATA_LOADER] Building user-item matrix with {cutoff_days} days cutoff")
+    current_time = datetime.now()
 
     # 1. 사용자 및 아이템 ID 매핑
     users = await user_repo.get_active_users(days=cutoff_days)
@@ -198,7 +199,7 @@ async def _build_user_item_matrix(
 
         if bookmark_user_id in user_id_map and bookmark_lecture_id in lecture_id_map:
             weight = USER_INTERACTION_WEIGHTS["bookmark"]
-            days_old = (datetime.now() - bookmark.created_at).days
+            days_old = (current_time - bookmark.created_at).days
             decayed_weight = weight * _calculate_time_decay(days_old)
 
             interactions.append(
@@ -229,5 +230,5 @@ async def _build_user_item_matrix(
         "users": [int(user.id) for user in users],
         "lectures": [int(lecture.id) for lecture in lectures],
         "matrix": user_item_matrix,
-        "last_trained_at": datetime.now(),
+        "last_trained_at": current_time,
     }
