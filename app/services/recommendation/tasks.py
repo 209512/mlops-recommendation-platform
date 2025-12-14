@@ -5,9 +5,11 @@ from typing import Any
 
 import implicit
 from celery import current_app
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 from app.core.config import settings
 from app.infrastructure.database import get_async_db
+from app.services.mlflow.registry import ModelRegistry
 from app.services.mlflow.tracking import get_mlflow_tracking_service
 from app.services.recommendation.data_loader import ALSDataLoader
 from app.services.recommendation.repositories import (
@@ -30,6 +32,7 @@ def train_als_model(
 ) -> dict[str, Any]:
     """ALS 모델 학습 Celery 태스크"""
     run_id = None
+    mlflow_service = None
     try:
         # 데이터 로더 초기를 위한 비동기 컨텍스트 사용
         async def _train_model() -> dict[str, Any]:
@@ -104,7 +107,7 @@ def train_als_model(
                         "model_name": model_name,
                         "experiment_id": experiment_id,
                         "run_id": final_run_id,
-                        "model_info": model_info,  # model_info를 반환값에 포함
+                        "model_info": model_info,
                         "experiment": experiment_name,
                     }
                 except Exception as e:
@@ -286,22 +289,117 @@ def batch_recommendations(
 def cleanup_old_models(
     self: Any,
     days_to_keep: int = 30,
+    models_to_keep: int = 5,
 ) -> dict[str, Any]:
     """오래된 모델 정리"""
     try:
-        # TODO: MLflow 모델 정리 기능 구현
-        logger.info(f"Cleaning up models older than {days_to_keep} days")
+        logger.info(
+            f"Starting model cleanup: keeping models "
+            f"from last {days_to_keep} days, minimum {models_to_keep} models"
+        )
+
+        # MLflow 모델 레지스트리 연동
+        model_registry = ModelRegistry()
+        if not model_registry.client:
+            raise Exception("MLflow registry client not available")
+
+        # 모델 이름 목록 가져오기
+        model_name = "als_model"
+        model_versions = model_registry.get_model_versions(model_name)
+
+        if not model_versions:
+            logger.info("No models found to cleanup")
+            return {
+                "status": "success",
+                "days_to_keep": days_to_keep,
+                "models_to_keep": models_to_keep,
+                "cleaned_models": [],
+                "total_models": 0,
+            }
+
+        # 정리할 모델 결정
+        import datetime
+
+        cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_to_keep)
+
+        models_to_delete = []
+        models_kept = []
+
+        # 최신 모델부터 정렬
+        sorted_versions = sorted(
+            model_versions, key=lambda x: x.get("creation_timestamp", 0), reverse=True
+        )
+
+        # 최소 보유 개수는 유지
+        recent_models = sorted_versions[:models_to_keep]
+        older_models = sorted_versions[models_to_keep:]
+
+        # 최신 모델들 중에서도 기간 내 모델만 유지
+        for model in recent_models:
+            creation_time = datetime.datetime.fromtimestamp(
+                model.get("creation_timestamp", 0) / 1000
+            )
+            if creation_time >= cutoff_date:
+                models_kept.append(model)
+            else:
+                models_to_delete.append(model)
+
+        # 오래된 모델들 중에서도 기간 초과 모델만 삭제
+        for model in older_models:
+            creation_time = datetime.datetime.fromtimestamp(
+                model.get("creation_timestamp", 0) / 1000
+            )
+            if creation_time < cutoff_date:
+                models_to_delete.append(model)
+            else:
+                models_kept.append(model)
+
+        # 모델 삭제 실행
+        deleted_models = []
+        for model in models_to_delete:
+            try:
+                version = model.get("version")
+                if version:
+                    # 모델을 Archived 상태로 변경 후 삭제
+                    model_registry.archive_model(model_name, version)
+                    model_registry.delete_model_version(model_name, version)
+                    deleted_models.append(version)
+                    logger.info(f"Deleted model version: {version}")
+            except Exception as e:
+                logger.warning(f"Failed to delete model version {model.get('version')}: {e}")
+
+        # Prometheus 메트릭 기록
+        try:
+            prometheus_registry = CollectorRegistry()
+            cleanup_gauge = Gauge(
+                "model_cleanup_count", "Number of models cleaned up", registry=prometheus_registry
+            )
+            cleanup_gauge.set(len(deleted_models))
+
+            push_to_gateway("localhost:9091", job="model_cleanup", registry=prometheus_registry)
+        except Exception as e:
+            logger.warning(f"Failed to push metrics: {e}")
+
+        logger.info(
+            f"Model cleanup completed: "
+            f"deleted {len(deleted_models)} models, kept {len(models_kept)} models"
+        )
 
         return {
             "status": "success",
             "days_to_keep": days_to_keep,
-            "cleaned_models": [],
+            "models_to_keep": models_to_keep,
+            "cleaned_models": deleted_models,
+            "total_models": len(model_versions),
+            "kept_models": len(models_kept),
         }
 
     except Exception as e:
-        logger.error(f"Failed to cleanup old models: {str(e)}")
+        logger.error(f"Failed to cleanup old models: {str(e)}", exc_info=True)
         return {
             "status": "error",
             "error": str(e),
             "days_to_keep": days_to_keep,
+            "models_to_keep": models_to_keep,
+            "cleaned_models": [],
         }

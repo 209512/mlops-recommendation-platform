@@ -1,5 +1,7 @@
+import io
 import json
 import logging
+import os
 import time
 from typing import Any, TypedDict
 
@@ -8,8 +10,10 @@ import mlflow
 import mlflow.pyfunc
 import numpy as np
 from mlflow.pyfunc.model import PythonModel
-from scipy.sparse import csr_matrix
+from mypy_boto3_s3 import S3Client
+from scipy.sparse import csr_matrix, load_npz, save_npz
 
+from app.infrastructure.aws import get_s3_client
 from app.infrastructure.redis import get_redis_client
 from app.services.recommendation.constants import (
     ALS_PARAMS,
@@ -19,9 +23,13 @@ from app.services.recommendation.constants import (
 
 logger = logging.getLogger(__name__)
 
+# 환경 설정
+USE_S3_STORAGE = os.getenv("USE_S3_STORAGE", "true").lower() == "true"
+MODEL_STORAGE_PATH = os.getenv("MODEL_STORAGE_PATH", "./models")
+
 
 class ModelBundle(TypedDict):
-    """ALS 모델 번들 타입 정의"""
+    """ALS 모델 번들 타입 정의 - 메모리 최적화 버전"""
 
     model: implicit.als.AlternatingLeastSquares
     user_to_idx: dict[int, int]
@@ -29,7 +37,8 @@ class ModelBundle(TypedDict):
     idx_to_lecture: dict[int, int]
     users: list[int]
     lectures: list[int]
-    matrix: csr_matrix
+    matrix_location: str
+    # matrix 필드 제거 - 메모리 절약
     last_trained_at: float
     training_time: float | None
 
@@ -78,7 +87,7 @@ class ALSModelWrapper(PythonModel):
             else:
                 raise ValueError("Invalid input format")
 
-            # 사용자 ID를 인덱스로 변환
+                # 사용자 ID를 인덱스로 변환
             if user_id is None:
                 raise ValueError("user_id is required")
             user_idx = self.user_to_idx.get(int(user_id))
@@ -86,7 +95,7 @@ class ALSModelWrapper(PythonModel):
                 logger.warning(f"User {user_id} not found in model")
                 return {"lecture_ids": [], "scores": []}
 
-            # ALS 추천 생성
+                # ALS 추천 생성
             user_items: csr_matrix = csr_matrix(
                 ([1], ([0], [user_idx])), shape=(1, len(self.lecture_to_idx))
             )
@@ -109,14 +118,31 @@ class ALSModelWrapper(PythonModel):
 
 
 class ALSTrainer:
-    """ALS 모델 트레이너"""
+    """ALS 모델 트레이너 - 메모리 최적화 버전"""
 
     def __init__(self) -> None:
         self.redis_client = get_redis_client()
         self.model: implicit.als.AlternatingLeastSquares | None = None
+        self._s3_client: S3Client | None = None
+        self.use_s3 = USE_S3_STORAGE
+        self.storage_path = MODEL_STORAGE_PATH
+
+        # S3 클라이언트는 필요할 때만 초기화 (중복 초기화 방지)
+        self._s3_client = None
+
+    @property
+    def s3_client(self) -> S3Client | None:
+        """S3 클라이언트 지연 초기화 - 중복 생성 방지"""
+        if self.use_s3 and self._s3_client is None:
+            try:
+                self._s3_client = get_s3_client()
+            except ImportError:
+                logger.warning("AWS infrastructure not available, falling back to local storage")
+                self.use_s3 = False
+        return self._s3_client
 
     def train_model(self, matrix_bundle: dict[str, Any]) -> bool:
-        """ALS 모델 학습"""
+        """ALS 모델 학습 - 메모리 최적화"""
         try:
             # 분산 락 획득
             lock_key = f"als_training_lock_{MODEL_VERSION}"
@@ -124,48 +150,50 @@ class ALSTrainer:
                 logger.warning("[TRAINER] Training already in progress")
                 return False
 
-            # 데이터 추출
+                # 데이터 추출
             matrix = matrix_bundle["matrix"]
             users = matrix_bundle["users"]
             lectures = matrix_bundle["lectures"]
             user_to_idx = matrix_bundle["user_to_idx"]
             lecture_to_idx = matrix_bundle["lecture_to_idx"]
 
-            # 역매핑 딕셔너리 생성
-            idx_to_lecture = {v: k for k, v in lecture_to_idx.items()}
-
-            # ALS 모델 학습
-            start_time = time.time()
+            # ALS 모델 생성 및 학습
             self.model = implicit.als.AlternatingLeastSquares(
                 factors=ALS_PARAMS.factors,
-                iterations=ALS_PARAMS.iterations,
                 regularization=ALS_PARAMS.regularization,
-                random_state=42,
+                iterations=ALS_PARAMS.iterations,
+                calculate_training_loss=ALS_PARAMS.calculate_training_loss,
+                use_gpu=False,  # CPU 버전으로 구현
             )
 
-            self.model.fit(matrix)
+            start_time = time.time()
+            self.model.fit(matrix, show_progress=False)
             training_time = time.time() - start_time
 
-            # 모델 번들 생성
+            logger.info(f"[TRAINER] Model training completed in {training_time:.2f} seconds")
+
+            # matrix 저장 (별도로 저장)
+            matrix_location = self._save_matrix(matrix, time.time())
+
+            # 모델 번들 생성 - matrix 제외
             model_bundle: ModelBundle = {
                 "model": self.model,
                 "user_to_idx": user_to_idx,
                 "lecture_to_idx": lecture_to_idx,
-                "idx_to_lecture": idx_to_lecture,
+                "idx_to_lecture": {v: k for k, v in lecture_to_idx.items()},
                 "users": users,
                 "lectures": lectures,
-                "matrix": matrix,
+                "matrix_location": matrix_location,
+                # matrix 필드 제거로 메모리 절약
                 "last_trained_at": time.time(),
                 "training_time": training_time,
             }
 
-            # MLflow에 모델 저장
-            success = self._save_model_to_mlflow(model_bundle)
-
-            return success
+            # 저장
+            return self._save_model_to_mlflow(model_bundle)
 
         except Exception as e:
-            logger.error(f"[TRAINER] Training failed: {e}", exc_info=True)
+            logger.error(f"[TRAINER] Model training failed: {e}", exc_info=True)
             return False
         finally:
             self._release_lock(lock_key)
@@ -197,7 +225,6 @@ class ALSTrainer:
                     if uid in existing_user_to_idx
                 ]
                 if new_user_indices:
-                    # 새 사용자들의 상호작용 데이터 추출
                     user_data = new_interactions[
                         [i for i, uid in enumerate(new_users) if uid in existing_user_to_idx]
                     ]
@@ -211,7 +238,6 @@ class ALSTrainer:
                     if lid in existing_lecture_to_idx
                 ]
                 if new_lecture_indices:
-                    # 새 강의들의 상호작용 데이터 (전치)
                     lecture_data = new_interactions.T[
                         [i for i, lid in enumerate(new_lectures) if lid in existing_lecture_to_idx]
                     ]
@@ -222,7 +248,7 @@ class ALSTrainer:
             # 기존 모델 업데이트
             self.model = existing_model
 
-            # 메타데이터만 업데이트 (매핑 정보 변경 시)
+            # 메타데이터만 업데이트
             updated_bundle = existing_bundle.copy()
             updated_bundle["last_trained_at"] = time.time()
             updated_bundle["training_time"] = training_time
@@ -240,36 +266,23 @@ class ALSTrainer:
             logger.error(f"[TRAINER] Incremental training failed: {e}")
             return {"status": "error", "message": str(e)}
 
-    def recommend(
-        self, user_idx: int, user_items: csr_matrix, limit: int = 10
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """추천 생성"""
-        if self.model is None:
-            raise RuntimeError("Model not trained")
-
-        recommended_indices, scores = self.model.recommend(
-            user_idx, user_items, N=limit, filter_already_liked_items=True
-        )
-
-        return recommended_indices, scores
-
     def load_model(self) -> ModelBundle | None:
-        """모델 로드"""
+        """저장된 모델 로드 - 메모리 효율적"""
         try:
-            # MLflow에서 최신 모델 로드
-            model_uri = "models:/als_recommendation_model/latest"  # 직접 URI 사용
-
-            # MLflow 모델 로드
-            loaded_model = mlflow.pyfunc.load_model(model_uri)
-            pyfunc_model = loaded_model._model_impl.python_model
-
-            # 메타데이터 로드
+            # Redis에서 메타데이터 로드
             metadata = self._load_metadata()
             if not metadata:
-                logger.warning("[TRAINER] No metadata found")
                 return None
 
-            # 모델 번들 재구성
+                # MLflow에서 모델 로드
+            pyfunc_model = mlflow.pyfunc.load_model(
+                model_uri=f"models:/als_recommendation_model/{metadata['model_version']}"
+            )
+
+            # matrix는 필요할 때만 로드 (지연 로딩)
+            # matrix = self._load_matrix(metadata["matrix_location"])
+
+            # ModelBundle 재구성 - matrix 제외
             model_bundle: ModelBundle = {
                 "model": pyfunc_model.model,
                 "user_to_idx": metadata["user_to_idx"],
@@ -277,7 +290,8 @@ class ALSTrainer:
                 "idx_to_lecture": metadata["idx_to_lecture"],
                 "users": metadata["users"],
                 "lectures": metadata["lectures"],
-                "matrix": metadata["matrix"],
+                "matrix_location": metadata["matrix_location"],
+                # matrix는 필요시에만 로드
                 "last_trained_at": metadata["last_trained_at"],
                 "training_time": metadata["training_time"],
             }
@@ -288,6 +302,16 @@ class ALSTrainer:
         except Exception as e:
             logger.error(f"[TRAINER] Failed to load model: {e}", exc_info=True)
             return None
+
+    def recommend(
+        self, user_idx: int, user_items: csr_matrix, n: int = 10
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """추천 생성"""
+        if self.model is None:
+            raise ValueError("Model not loaded")
+
+        result = self.model.recommend(user_idx, user_items, n=n, filter_already_liked_items=True)
+        return (np.array(result[0]), np.array(result[1]))
 
     def get_model_info(self) -> dict[str, Any]:
         """모델 정보 조회"""
@@ -300,6 +324,8 @@ class ALSTrainer:
                     "training_time": model_bundle.get("training_time"),
                     "user_count": len(model_bundle.get("users", [])),
                     "lecture_count": len(model_bundle.get("lectures", [])),
+                    "storage_type": "s3" if self.use_s3 else "local",
+                    "matrix_location": model_bundle.get("matrix_location"),
                 }
             else:
                 return {"status": "not_found"}
@@ -307,21 +333,8 @@ class ALSTrainer:
             logger.error(f"[TRAINER] Failed to get model info: {e}")
             return {"status": "error", "message": str(e)}
 
-    def _acquire_lock(self, lock_key: str, timeout: int) -> bool:
-        """분산 락 획득"""
-        for _attempt in range(3):
-            acquired = self.redis_client.set(lock_key, "locked", nx=True, ex=timeout)
-            if acquired:
-                return True
-            time.sleep(0.1)
-        return False
-
-    def _release_lock(self, lock_key: str) -> None:
-        """분산 락 해제"""
-        self.redis_client.delete(lock_key)
-
     def _save_model_to_mlflow(self, model_bundle: ModelBundle) -> bool:
-        """MLflow에 모델 저장"""
+        """MLflow에 모델 저장 - 메모리 최적화"""
         try:
             # 모델 래퍼 생성
             wrapper = ALSModelWrapper(
@@ -357,14 +370,15 @@ class ALSTrainer:
                     }
                 )
 
-                # 메타데이터를 Redis에 저장
+                # matrix는 이미 별도로 저장됨
+                # 메타데이터를 Redis에 저장 (matrix 제외)
                 metadata = {
                     "user_to_idx": model_bundle["user_to_idx"],
                     "lecture_to_idx": model_bundle["lecture_to_idx"],
                     "idx_to_lecture": model_bundle["idx_to_lecture"],
                     "users": model_bundle["users"],
                     "lectures": model_bundle["lectures"],
-                    "matrix": model_bundle["matrix"],
+                    "matrix_location": model_bundle["matrix_location"],
                     "last_trained_at": model_bundle["last_trained_at"],
                     "training_time": model_bundle["training_time"],
                     "model_version": model_info.model_version,
@@ -380,11 +394,120 @@ class ALSTrainer:
             logger.error(f"[TRAINER] Failed to save model to MLflow: {e}", exc_info=True)
             return False
 
-    def _save_metadata(self, metadata: dict[str, Any]) -> None:
-        """메타데이터를 Redis에 저장"""
+    def _save_matrix(self, matrix: csr_matrix, timestamp: float) -> str:
+        """matrix를 S3 또는 로컬에 저장"""
+        if USE_S3_STORAGE:
+            return self._save_matrix_to_s3(matrix, timestamp)
+        else:
+            return self._save_matrix_to_local(matrix, timestamp)
 
-        metadata_json = json.dumps(metadata, default=str)
-        self.redis_client.set(f"als_metadata_{MODEL_VERSION}", metadata_json, ex=86400)
+    def _save_matrix_to_s3(self, matrix: csr_matrix, timestamp: float) -> str:
+        """matrix를 S3에 저장"""
+        try:
+            s3_client = get_s3_client()
+            bucket_name = os.getenv("MODEL_BUCKET_NAME", "mlops-models")
+            key = f"als/models/matrix_{int(timestamp)}.npz"
+
+            buffer = io.BytesIO()
+            save_npz(buffer, matrix)
+            buffer.seek(0)
+
+            s3_client.put_object(Bucket=bucket_name, Key=key, Body=buffer.getvalue())
+
+            location = f"s3://{bucket_name}/{key}"
+            logger.info(f"[TRAINER] Matrix saved to S3: {location}")
+            return location
+
+        except Exception as e:
+            logger.error(f"[TRAINER] Failed to save matrix to S3: {e}")
+            # S3 실패 시 로컬 폴백
+            logger.info("[TRAINER] Falling back to local storage")
+            return self._save_matrix_to_local(matrix, timestamp)
+
+    def _save_matrix_to_local(self, matrix: csr_matrix, timestamp: float) -> str:
+        """matrix를 로컬 파일 시스템에 저장"""
+        try:
+            os.makedirs(self.storage_path, exist_ok=True)
+
+            filename = f"matrix_{int(timestamp)}.npz"
+            file_path = os.path.join(self.storage_path, filename)
+
+            save_npz(file_path, matrix)
+
+            logger.info(f"[TRAINER] Matrix saved locally: {file_path}")
+            return file_path
+
+        except Exception as e:
+            logger.error(f"[TRAINER] Failed to save matrix locally: {e}")
+            raise
+
+    def _load_matrix(self, location: str) -> csr_matrix | None:
+        """S3 또는 로컬에서 matrix 로드 - 필요시에만 호출"""
+        try:
+            if location.startswith("s3://"):
+                return self._load_matrix_from_s3(location)
+            else:
+                return self._load_matrix_from_local(location)
+        except Exception as e:
+            logger.error(f"[TRAINER] Failed to load matrix from {location}: {e}")
+            return None
+
+    def _load_matrix_from_s3(self, s3_url: str) -> csr_matrix | None:
+        """S3에서 matrix 로드"""
+        try:
+            s3_client = get_s3_client()
+            bucket_name = os.getenv("MODEL_BUCKET_NAME", "mlops-models")
+
+            # S3 URL에서 key 추출
+            key = s3_url.replace(f"s3://{bucket_name}/", "")
+
+            # S3에서 파일 다운로드
+            response = s3_client.get_object(Bucket=bucket_name, Key=key)
+            buffer = io.BytesIO(response["Body"].read())
+
+            # matrix 로드
+            matrix = load_npz(buffer)
+            return csr_matrix(matrix) if matrix is not None else None
+
+        except Exception as e:
+            logger.error(f"[TRAINER] Failed to load matrix from S3: {e}")
+            return None
+
+    def _load_matrix_from_local(self, file_path: str) -> csr_matrix | None:
+        """로컬 파일 시스템에서 matrix 로드"""
+        try:
+            if not os.path.exists(file_path):
+                logger.warning(f"[TRAINER] Matrix file not found: {file_path}")
+                return None
+
+            result = load_npz(file_path)
+            return csr_matrix(result) if result is not None else None
+
+        except Exception as e:
+            logger.error(f"[TRAINER] Failed to load matrix locally: {e}")
+            return None
+
+    def _acquire_lock(self, lock_key: str, timeout: int) -> bool:
+        """분산 락 획득"""
+        for _attempt in range(3):
+            acquired = self.redis_client.set(lock_key, "locked", nx=True, ex=timeout)
+            if acquired:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def _release_lock(self, lock_key: str) -> None:
+        """분산 락 해제"""
+        self.redis_client.delete(lock_key)
+
+    def _save_metadata(self, metadata: dict[str, Any]) -> None:
+        """메타데이터를 Redis에 저장 (matrix 제외)"""
+        try:
+            metadata_json = json.dumps(metadata, default=str)
+            self.redis_client.set(f"als_metadata_{MODEL_VERSION}", metadata_json, ex=86400)
+        except Exception as e:
+            logger.error(f"[TRAINER] Failed to save metadata: {e}")
+            raise
 
     def _load_metadata(self) -> dict[str, Any] | None:
         """Redis에서 메타데이터 로드"""

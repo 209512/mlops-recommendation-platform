@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     # FastAPI
     allowed_hosts: list[str] = Field(default=["localhost", "127.0.0.1"])
 
+    # CORS 설정
+    cors_origins: list[str] = Field(default=[])
+    cors_allow_credentials: bool = Field(default=True)
+    cors_allow_methods: list[str] = Field(default=["GET", "POST", "PUT", "DELETE"])
+    cors_allow_headers: list[str] = Field(default=["Content-Type", "Authorization"])
+
     # Celery
     celery_broker_url: str = Field(...)
     celery_result_backend: str = Field(...)
