@@ -49,7 +49,10 @@ dev = [
     "types-boto3",
     "types-redis",
     "types-requests",
-    "celery-types"
+    "celery-types",
+    "mypy-boto3-s3",
+    "mypy-boto3-cloudwatch",
+    "mypy-boto3-ecr"
 ]
 
 [tool.hatch.build.targets.wheel]
