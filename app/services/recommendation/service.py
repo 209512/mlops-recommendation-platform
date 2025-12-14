@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.schemas.recommendation import RecommendationResponse
@@ -38,6 +40,9 @@ class RecommendationService:
         )
         self.trainer = ALSTrainer()
 
+        # 스레드 풀 실행기 (CPU 집약적 작업용)
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="als_model")
+
     async def get_recommendations(
         self, user_id: int, limit: int = 10
     ) -> list[RecommendationResponse]:
@@ -75,10 +80,13 @@ class RecommendationService:
     async def _get_als_recommendations(
         self, user_id: int, limit: int
     ) -> list[RecommendationResponse]:
-        """ALS 기반 추천"""
+        """ALS 기반 추천 (비동기 처리)"""
         try:
-            # 모델 로드
-            model_bundle = self.trainer.load_model()
+            loop = asyncio.get_event_loop()
+
+            # 스레드 풀에서 동기 모델 로드 실행
+            model_bundle = await loop.run_in_executor(self.executor, self.trainer.load_model)
+
             if not model_bundle:
                 return []
 
@@ -87,17 +95,33 @@ class RecommendationService:
             if user_idx is None:
                 return []
 
-            # 특정 사용자의 상호작용 데이터 추출
-            user_items = model_bundle["matrix"][user_idx]
+            # matrix를 location에서 로드
+            matrix_location = model_bundle.get("matrix_location")
+            if not matrix_location:
+                logger.error("[RECOMMENDATION] No matrix location in model bundle")
+                return []
 
-            # ALS 추천 생성
-            recommended_indices, scores = self.trainer.recommend(user_idx, user_items, limit)
+                # 스레드 풀에서 matrix 로드 실행
+            matrix = await loop.run_in_executor(
+                self.executor, self.trainer._load_matrix, matrix_location
+            )
+            if matrix is None:
+                logger.error("[RECOMMENDATION] Failed to load matrix")
+                return []
+
+            # 특정 사용자의 상호작용 데이터 추출
+            user_items = matrix[user_idx]
+
+            # 스레드 풀에서 동기 ALS 추천 생성 실행
+            recommended_indices, scores = await loop.run_in_executor(
+                self.executor, self.trainer.recommend, user_idx, user_items, limit
+            )
 
             # 인덱스를 실제 강의 ID로 변환
             idx_to_lecture = {v: k for k, v in model_bundle["lecture_to_idx"].items()}
             recommended_ids = [idx_to_lecture[idx] for idx in recommended_indices]
 
-            # 강의 상세 정보 조회
+            # 강의 상세 정보 조회 (비동기)
             lectures = await self.lecture_repo.get_lectures_by_ids(recommended_ids)
 
             return self._convert_to_recommendations(
@@ -169,10 +193,35 @@ class RecommendationService:
     ) -> bool:
         """피드백 기록"""
         try:
-            # 피드백 저장 로직 구현
+            # 1. 피드백 데이터 검증
+            if not feedback or "rating" not in feedback:
+                logger.warning(f"Invalid feedback data for user {user_id}, lecture {lecture_id}")
+                return False
+
+            rating = feedback["rating"]
+            if not isinstance(rating, (int, float)) or rating < 0 or rating > 5:
+                logger.warning(f"Invalid rating value: {rating} for user {user_id}")
+                return False
+
+            # 2. 피드백 저장 (Repository 패턴 사용)
+            await self.bookmark_repo.create_bookmark(user_id=user_id, lecture_id=lecture_id)
+
+            # 3. 사용자 선호도 업데이트 (weight 없이)
+            lecture = await self.lecture_repo.get_lecture_by_id(lecture_id)
+            if lecture and lecture.categories:
+                for category in lecture.categories:
+                    await self.user_pref_repo.update_category_preference(
+                        user_id=user_id, category_id=category.id
+                    )
+
+            logger.info(
+                f"[FEEDBACK] Recorded feedback: "
+                f"user={user_id}, lecture={lecture_id}, rating={rating}"
+            )
             return True
+
         except Exception as e:
-            logger.error(f"Failed to record feedback: {e}")
+            logger.error(f"[FEEDBACK] Failed to record feedback: {e}", exc_info=True)
             return False
 
     def _convert_to_recommendations(
@@ -205,7 +254,7 @@ class RecommendationService:
 
     async def train_model(self, force_retrain: bool = False) -> dict[str, Any]:
         """
-        모델 학습
+        모델 학습 (비동기 처리)
 
         Args:
             force_retrain: 강제 재학습 여부
@@ -219,8 +268,11 @@ class RecommendationService:
             if not matrix_bundle:
                 return {"status": "error", "message": "Failed to load training data"}
 
-            # 모델 학습
-            success = self.trainer.train_model(matrix_bundle)
+            # 스레드 풀에서 동기 모델 학습 실행
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                self.executor, self.trainer.train_model, matrix_bundle
+            )
 
             return {"status": "success" if success else "error", "model_version": "latest"}
 
@@ -229,10 +281,16 @@ class RecommendationService:
             return {"status": "error", "message": str(e)}
 
     async def get_model_info(self) -> dict[str, Any]:
-        """모델 정보 조회"""
+        """모델 정보 조회 (비동기 처리)"""
         try:
-            model_info = self.trainer.get_model_info()
+            loop = asyncio.get_event_loop()
+            model_info = await loop.run_in_executor(self.executor, self.trainer.get_model_info)
             return model_info
         except Exception as e:
             logger.error(f"Failed to get model info: {e}")
             return {"status": "error", "message": str(e)}
+
+    async def cleanup(self) -> None:
+        """리소스 정리"""
+        if hasattr(self, "executor"):
+            self.executor.shutdown(wait=True)

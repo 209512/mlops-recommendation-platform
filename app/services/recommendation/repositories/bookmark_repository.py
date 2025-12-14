@@ -17,6 +17,14 @@ class BookmarkRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    async def create_bookmark(self, user_id: int, lecture_id: int) -> Bookmark:
+        """북마크 생성"""
+        bookmark = Bookmark(user_id=user_id, lecture_id=lecture_id)
+        self.db.add(bookmark)
+        await self.db.commit()
+        await self.db.refresh(bookmark)
+        return bookmark
+
     async def get_lecture_bookmark_count(self, lecture_id: int) -> int:
         """강의 북마크 수 조회"""
         query = select(func.count(Bookmark.id)).where(Bookmark.lecture_id == lecture_id)

@@ -21,6 +21,7 @@ from app.core.exception import MLOpsError
 from app.infrastructure.database import async_engine
 from app.infrastructure.redis import is_redis_healthy, redis_client
 from app.services.mlflow.tracking import get_mlflow_tracking_service
+from app.services.recommendation.model_trainer import ALSTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +68,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 모델 로딩 시도
     try:
-        # TODO: 모델 로딩 로직 구현
-        logger.info("Model loading skipped - not implemented")
+        logger.info("Loading ALS recommendation model...")
+        trainer = ALSTrainer()
+
+        # 모델 로드 시도
+        model_bundle = trainer.load_model()
+
+        if model_bundle:
+            logger.info("✓ ALS model loaded successfully")
+            # 모델 정보 로깅
+            model_info = trainer.get_model_info()
+            if model_info:
+                logger.info(f"Model version: {model_info.get('model_version', 'unknown')}")
+                logger.info(f"Last trained: {model_info.get('last_trained_at', 'unknown')}")
+        else:
+            logger.warning("⚠ Failed to load ALS model - will use fallback recommendations")
+            logger.info("Model will be loaded on-demand when first recommendation is requested")
+
     except Exception as e:
-        logger.warning(f"Model loading failed: {e}")
+        logger.error(f"✗ Model loading failed: {e}")
+        logger.warning("Application will continue with fallback recommendations")
+        logger.info("Model will be loaded on-demand when first recommendation is requested")
 
     logger.info("MLOps Recommendation Platform started successfully")
 
@@ -86,6 +104,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("MLflow resources cleaned up")
     except Exception as e:
         logger.warning(f"MLflow cleanup failed: {e}")
+
+    # 모델 리소스 정리
+    try:
+        trainer = ALSTrainer()
+        # executor 정리
+        if hasattr(trainer, "executor"):
+            trainer.executor.shutdown(wait=True)
+        logger.info("Model resources cleaned up")
+    except Exception as e:
+        logger.warning(f"Model cleanup failed: {e}")
 
     try:
         await async_engine.dispose()
