@@ -1,6 +1,9 @@
+import logging
 from typing import Any
 
-from fastapi import HTTPException
+from fastapi import HTTPException, status
+
+logger = logging.getLogger(__name__)
 
 
 class MLOpsError(Exception):
@@ -10,12 +13,22 @@ class MLOpsError(Exception):
         self,
         message: str,
         error_code: str | None = None,
+        status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR,
         details: dict[str, Any] | None = None,
     ):
         self.message = message
         self.error_code = error_code
+        self.status_code = status_code
         self.details = details or {}
-        super().__init__(self.message)
+        super().__init__(message)
+
+    def to_dict(self) -> dict[str, Any]:
+        """딕셔너리 형태로 변환"""
+        return {
+            "error": self.error_code or "InternalServerError",
+            "message": self.message,
+            "details": self.details,
+        }
 
 
 class ModelNotFoundError(MLOpsError):
@@ -26,7 +39,9 @@ class ModelNotFoundError(MLOpsError):
         if version:
             message += f" version '{version}'"
         message += " not found"
-        super().__init__(message, error_code="MODEL_NOT_FOUND")
+        super().__init__(
+            message=message, error_code="MODEL_NOT_FOUND", status_code=status.HTTP_404_NOT_FOUND
+        )
 
 
 class TrainingError(MLOpsError):
@@ -37,7 +52,11 @@ class TrainingError(MLOpsError):
         if model_type:
             full_message += f" in {model_type}"
         full_message += f": {message}"
-        super().__init__(full_message, error_code="TRAINING_ERROR")
+        super().__init__(
+            message=full_message,
+            error_code="TRAINING_ERROR",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 class DataLoadError(MLOpsError):
@@ -48,7 +67,11 @@ class DataLoadError(MLOpsError):
         if source:
             full_message += f" from {source}"
         full_message += f": {message}"
-        super().__init__(full_message, error_code="DATA_LOAD_ERROR")
+        super().__init__(
+            message=full_message,
+            error_code="DATA_LOAD_ERROR",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
 
 
 class RecommendationError(MLOpsError):
@@ -59,7 +82,11 @@ class RecommendationError(MLOpsError):
         if user_id:
             full_message += f" for user {user_id}"
         full_message += f": {message}"
-        super().__init__(full_message, error_code="RECOMMENDATION_ERROR")
+        super().__init__(
+            message=full_message,
+            error_code="RECOMMENDATION_ERROR",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 def create_http_exception(

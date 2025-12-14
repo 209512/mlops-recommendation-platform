@@ -142,10 +142,10 @@ def create_app() -> FastAPI:
     # 미들웨어 설정
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.allowed_hosts,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=settings.cors_origins,
+        allow_credentials=settings.cors_allow_credentials,
+        allow_methods=settings.cors_allow_methods,
+        allow_headers=settings.cors_allow_headers,
     )
 
     app.add_middleware(
@@ -161,9 +161,9 @@ def create_app() -> FastAPI:
     async def mlops_exception_handler(request: Request, exc: MLOpsError) -> JSONResponse:
         """MLOps 전용 예외 핸들러"""
         return JSONResponse(
-            status_code=getattr(exc, "status_code", 500),
+            status_code=exc.status_code if hasattr(exc, "status_code") else 500,
             content={
-                "error": getattr(exc, "error_type", "MLOpsError"),
+                "error": getattr(exc, "error_code", "MLOpsError"),
                 "message": str(exc),
                 "details": getattr(exc, "details", {}),
             },
