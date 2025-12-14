@@ -7,16 +7,29 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import settings
 from app.models.base import Base
 
+# 데이터베이스 연결 풀 설정 (중앙 관리)
+POOL_SIZE = 20
+MAX_OVERFLOW = 30
+POOL_RECYCLE = 300
+POOL_PRE_PING = True
+
 # 동기 SQLAlchemy 엔진 (Alembic 마이그레이션용)
 engine = create_engine(
-    settings.database_url or "", pool_pre_ping=True, pool_recycle=300, echo=settings.debug
+    settings.database_url or "",
+    pool_pre_ping=POOL_PRE_PING,
+    pool_recycle=POOL_RECYCLE,
+    pool_size=POOL_SIZE,
+    max_overflow=MAX_OVERFLOW,
+    echo=settings.debug,
 )
 
 # 비동기 SQLAlchemy 엔진
 async_engine = create_async_engine(
     (settings.database_url or "").replace("postgresql://", "postgresql+asyncpg://"),
-    pool_pre_ping=True,
-    pool_recycle=300,
+    pool_pre_ping=POOL_PRE_PING,
+    pool_recycle=POOL_RECYCLE,
+    pool_size=POOL_SIZE,
+    max_overflow=MAX_OVERFLOW,
     echo=settings.debug,
 )
 

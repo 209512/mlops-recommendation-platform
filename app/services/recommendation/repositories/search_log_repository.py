@@ -16,6 +16,34 @@ class SearchLogRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    def _parse_clicked_lecture_ids(self, clicked_ids: str | None) -> list[int]:
+        """
+        JSON 형식의 clicked_lecture_ids를 파싱하는 헬퍼 함수
+
+        Args:
+            clicked_ids: JSON 문자열 또는 None
+
+        Returns:
+            강의 ID 리스트
+        """
+        try:
+            return json.loads(clicked_ids) if clicked_ids else []
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse clicked_lecture_ids: {clicked_ids}")
+            return []
+
+    def _serialize_clicked_lecture_ids(self, lecture_ids: list[int] | None) -> str | None:
+        """
+        강의 ID 리스트를 JSON 문자열로 직렬화하는 헬퍼 함수
+
+        Args:
+            lecture_ids: 강의 ID 리스트 또는 None
+
+        Returns:
+            JSON 문자열 또는 None
+        """
+        return json.dumps(lecture_ids) if lecture_ids else None
+
     async def get_lecture_search_count(self, lecture_id: int, days: int = 30) -> int:
         """강의 검색 횟수 조회"""
         cutoff_date = datetime.now() - timedelta(days=days)
@@ -57,21 +85,15 @@ class SearchLogRepository:
         interactions = []
 
         for row in result:
-            # JSON 형식의 clicked_lecture_ids 파싱
-            import json
+            clicked_ids = self._parse_clicked_lecture_ids(row.clicked_lecture_ids)
+            weight = 1.0
 
-            try:
-                clicked_ids = json.loads(row.clicked_lecture_ids) if row.clicked_lecture_ids else []
-                weight = 1.0
+            # 검색 시간이 길수록 가중치 증가
+            if row.search_duration:
+                weight = min(weight + (row.search_duration / 10.0), 3.0)
 
-                # 검색 시간이 길수록 가중치 증가
-                if row.search_duration:
-                    weight = min(weight + (row.search_duration / 10.0), 3.0)
-
-                for lecture_id in clicked_ids:
-                    interactions.append((row.user_id, lecture_id, weight))
-            except json.JSONDecodeError:
-                continue
+            for lecture_id in clicked_ids:
+                interactions.append((row.user_id, lecture_id, weight))
 
         return interactions
 
@@ -102,17 +124,14 @@ class SearchLogRepository:
         interactions = []
 
         for row in result:
-            try:
-                clicked_ids = json.loads(row.clicked_lecture_ids) if row.clicked_lecture_ids else []
-                weight = 1.0
+            clicked_ids = self._parse_clicked_lecture_ids(row.clicked_lecture_ids)
+            weight = 1.0
 
-                if row.search_duration:
-                    weight = min(weight + (row.search_duration / 10.0), 3.0)
+            if row.search_duration:
+                weight = min(weight + (row.search_duration / 10.0), 3.0)
 
-                for lecture_id in clicked_ids:
-                    interactions.append((row.user_id, lecture_id, weight))
-            except json.JSONDecodeError:
-                continue
+            for lecture_id in clicked_ids:
+                interactions.append((row.user_id, lecture_id, weight))
 
         return interactions
 
@@ -137,11 +156,10 @@ class SearchLogRepository:
         Returns:
             생성된 검색 로그
         """
-
         search_log = LectureSearchLog(
             user_id=user_id,
             search_query=search_query,
-            clicked_lecture_ids=json.dumps(clicked_lecture_ids) if clicked_lecture_ids else None,
+            clicked_lecture_ids=self._serialize_clicked_lecture_ids(clicked_lecture_ids),
             search_duration=search_duration,
             result_count=result_count,
         )
