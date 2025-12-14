@@ -1,6 +1,10 @@
 import logging
+from typing import Literal
 
 import boto3
+from mypy_boto3_cloudwatch import CloudWatchClient
+from mypy_boto3_ecr import ECRClient
+from mypy_boto3_s3 import S3Client
 
 from app.core.config import settings
 
@@ -18,26 +22,16 @@ class AWSClient:
         )
 
         # S3 클라이언트
-        self.s3_client = self.session.client("s3")
+        self.s3_client: S3Client = self.session.client("s3")
 
         # ECR 클라이언트
-        self.ecr_client = self.session.client("ecr")
+        self.ecr_client: ECRClient = self.session.client("ecr")
 
         # CloudWatch 클라이언트
-        self.cloudwatch_client = self.session.client("cloudwatch")
+        self.cloudwatch_client: CloudWatchClient = self.session.client("cloudwatch")
 
     def upload_to_s3(self, file_path: str, bucket: str, key: str) -> bool:
-        """
-        S3에 파일 업로드
-
-        Args:
-            file_path: 로컬 파일 경로
-            bucket: S3 버킷 이름
-            key: S3 객체 키
-
-        Returns:
-            성공 여부
-        """
+        """S3에 파일 업로드"""
         try:
             self.s3_client.upload_file(file_path, bucket, key)
             return True
@@ -46,17 +40,7 @@ class AWSClient:
             return False
 
     def download_from_s3(self, bucket: str, key: str, file_path: str) -> bool:
-        """
-        S3에서 파일 다운로드
-
-        Args:
-            bucket: S3 버킷 이름
-            key: S3 객체 키
-            file_path: 로컬 저장 경로
-
-        Returns:
-            성공 여부
-        """
+        """S3에서 파일 다운로드"""
         try:
             self.s3_client.download_file(bucket, key, file_path)
             return True
@@ -65,20 +49,41 @@ class AWSClient:
             return False
 
     def put_cloudwatch_metric(
-        self, namespace: str, metric_name: str, value: float, unit: str = "Count"
+        self,
+        namespace: str,
+        metric_name: str,
+        value: float,
+        unit: Literal[
+            "Bits",
+            "Bits/Second",
+            "Bytes",
+            "Bytes/Second",
+            "Count",
+            "Count/Second",
+            "Gigabits",
+            "Gigabits/Second",
+            "Gigabytes",
+            "Gigabytes/Second",
+            "Kilobits",
+            "Kilobits/Second",
+            "Kilobytes",
+            "Kilobytes/Second",
+            "Megabits",
+            "Megabits/Second",
+            "Megabytes",
+            "Megabytes/Second",
+            "Microseconds",
+            "Milliseconds",
+            "None",
+            "Percent",
+            "Seconds",
+            "Terabits",
+            "Terabits/Second",
+            "Terabytes",
+            "Terabytes/Second",
+        ] = "Count",
     ) -> bool:
-        """
-        CloudWatch에 메트릭 전송
-
-        Args:
-            namespace: 메트릭 네임스페이스
-            metric_name: 메트릭 이름
-            value: 메트릭 값
-            unit: 단위
-
-        Returns:
-            성공 여부
-        """
+        """CloudWatch에 메트릭 전송"""
         try:
             self.cloudwatch_client.put_metric_data(
                 Namespace=namespace,
@@ -92,3 +97,8 @@ class AWSClient:
 
 # AWS 클라이언트 인스턴스
 aws_client = AWSClient()
+
+
+def get_s3_client() -> S3Client:
+    """S3 클라이언트 반환"""
+    return aws_client.s3_client
