@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 class RecommendationRequest(BaseModel):
     """추천 요청 스키마"""
 
-    user_id: int = Field(..., gt=0)
     limit: int = Field(10, gt=0, le=100)
     exclude_bookmarked: bool = True
     model_version: str | None = None
@@ -24,8 +23,8 @@ class RecommendationResponse(BaseModel):
     difficulty: str | None = None
     original_price: int | None = None
     discount_price: int | None = None
-    rating: float | None = None  # 추가된 필드
-    review_count: int | None = None  # 추가된 필드
+    rating: float | None = None
+    review_count: int | None = None
     score: float = 0.0
     categories: list[str] = []
     generated_at: datetime = Field(default_factory=datetime.now)
