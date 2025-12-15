@@ -1,8 +1,11 @@
 import asyncio
+import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
 from typing import Any
 
+from app.infrastructure.redis import get_redis_client
 from app.schemas.recommendation import RecommendationResponse
 from app.services.recommendation.data_loader import ALSDataLoader
 from app.services.recommendation.model_trainer import ALSTrainer
@@ -40,52 +43,48 @@ class RecommendationService:
         )
         self.trainer = ALSTrainer()
 
-        # 스레드 풀 실행기 (CPU 집약적 작업용)
-        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="als_model")
+        # 프로세스 풀 실행기 (CPU 집약적 작업용)
+        self.executor = ProcessPoolExecutor(max_workers=4, mp_context=mp.get_context("spawn"))
 
     async def get_recommendations(
-        self, user_id: int, limit: int = 10
-    ) -> list[RecommendationResponse]:
-        """
-        사용자 맞춤 강의 추천 - 3단계 폴백 로직
-
-        Args:
-            user_id: 사용자 ID
-            limit: 추천 개수
-
-        Returns:
-            추천 강의 리스트
-        """
+        self,
+        user_id: int,
+        num_recommendations: int = 10,
+        exclude_bookmarked: bool = True,
+        exclude_completed: bool = True,
+    ) -> list[RecommendationResponse] | dict[str, Any]:
+        """사용자 추천 목록 조회 (비동기 처리)"""
         try:
-            # 1. ALS 추천 시도
-            recommendations = await self._get_als_recommendations(user_id, limit)
+            # 캐시 확인
+            cache_key = f"recommendations:{user_id}:{num_recommendations}"
+            cached = get_redis_client().get(cache_key)
 
-            # 2. 결과 부족 시 폴백
-            if len(recommendations) < limit:
-                fallback_recs = await self._get_category_fallback(
-                    user_id, limit - len(recommendations)
-                )
-                recommendations.extend(fallback_recs)
+            if cached:
+                recommendations_dict = json.loads(cached)
+                recommendations = [RecommendationResponse(**rec) for rec in recommendations_dict]
+                return recommendations
 
-            # 3. 최종 개수 조정
-            return recommendations[:limit]
+            # 비동기 추천 생성
+            recommendations = await asyncio.to_thread(
+                self._get_als_recommendations_sync, user_id, num_recommendations
+            )
+
+            # 캐시 저장 (5분)
+            recommendations_dict = [rec.model_dump() for rec in recommendations]
+            get_redis_client().setex(cache_key, 300, json.dumps(recommendations_dict))
+
+            return recommendations
 
         except Exception as e:
-            logger.error(
-                f"[RECOMMENDATION] Failed to get recommendations for user {user_id}: {e}",
-                exc_info=True,
-            )
-            return await self._get_popular_fallback(limit)
+            logger.error(f"[RECOMMENDATION] Failed to get recommendations: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
 
     async def _get_als_recommendations(
         self, user_id: int, limit: int
     ) -> list[RecommendationResponse]:
-        """ALS 기반 추천 (비동기 처리)"""
+        """ALS 기반 추천"""
         try:
-            loop = asyncio.get_event_loop()
-
-            # 스레드 풀에서 동기 모델 로드 실행
-            model_bundle = await loop.run_in_executor(self.executor, self.trainer.load_model)
+            model_bundle = await asyncio.to_thread(self.trainer.load_model)
 
             if not model_bundle:
                 return []
@@ -101,10 +100,7 @@ class RecommendationService:
                 logger.error("[RECOMMENDATION] No matrix location in model bundle")
                 return []
 
-                # 스레드 풀에서 matrix 로드 실행
-            matrix = await loop.run_in_executor(
-                self.executor, self.trainer._load_matrix, matrix_location
-            )
+            matrix = await asyncio.to_thread(self.trainer._load_matrix, matrix_location)
             if matrix is None:
                 logger.error("[RECOMMENDATION] Failed to load matrix")
                 return []
@@ -112,9 +108,8 @@ class RecommendationService:
             # 특정 사용자의 상호작용 데이터 추출
             user_items = matrix[user_idx]
 
-            # 스레드 풀에서 동기 ALS 추천 생성 실행
-            recommended_indices, scores = await loop.run_in_executor(
-                self.executor, self.trainer.recommend, user_idx, user_items, limit
+            recommended_indices, scores = await asyncio.to_thread(
+                self.trainer.recommend, user_idx, user_items, limit
             )
 
             # 인덱스를 실제 강의 ID로 변환
@@ -123,6 +118,55 @@ class RecommendationService:
 
             # 강의 상세 정보 조회 (비동기)
             lectures = await self.lecture_repo.get_lectures_by_ids(recommended_ids)
+
+            return self._convert_to_recommendations(
+                lectures, scores.tolist() if hasattr(scores, "tolist") else list(scores)
+            )
+
+        except Exception as e:
+            logger.error(f"[RECOMMENDATION] ALS recommendation failed: {e}", exc_info=True)
+            return []
+
+    def _get_als_recommendations_sync(
+        self, user_id: int, limit: int
+    ) -> list[RecommendationResponse]:
+        """ALS 기반 추천"""
+        try:
+            # 동기 모델 로드
+            model_bundle = self.trainer.load_model()
+
+            if not model_bundle:
+                return []
+
+            # 사용자 ID를 행렬 인덱스로 변환
+            user_idx = model_bundle["user_to_idx"].get(user_id)
+            if user_idx is None:
+                return []
+
+            # matrix를 location에서 로드
+            matrix_location = model_bundle.get("matrix_location")
+            if not matrix_location:
+                logger.error("[RECOMMENDATION] No matrix location in model bundle")
+                return []
+
+            # 동기 matrix 로드
+            matrix = self.trainer._load_matrix(matrix_location)
+            if matrix is None:
+                logger.error("[RECOMMENDATION] Failed to load matrix")
+                return []
+
+            # 특정 사용자의 상호작용 데이터 추출
+            user_items = matrix[user_idx]
+
+            # 동기 ALS 추천 생성
+            recommended_indices, scores = self.trainer.recommend(user_idx, user_items, limit)
+
+            # 인덱스를 실제 강의 ID로 변환
+            idx_to_lecture = {v: k for k, v in model_bundle["lecture_to_idx"].items()}
+            recommended_ids = [idx_to_lecture[idx] for idx in recommended_indices]
+
+            # 강의 상세 정보 조회는 비동기이므로 asyncio.run() 사용
+            lectures = asyncio.run(self.lecture_repo.get_lectures_by_ids(recommended_ids))
 
             return self._convert_to_recommendations(
                 lectures, scores.tolist() if hasattr(scores, "tolist") else list(scores)
@@ -206,13 +250,16 @@ class RecommendationService:
             # 2. 피드백 저장 (Repository 패턴 사용)
             await self.bookmark_repo.create_bookmark(user_id=user_id, lecture_id=lecture_id)
 
-            # 3. 사용자 선호도 업데이트 (weight 없이)
+            # 3. 사용자 선호도 업데이트
             lecture = await self.lecture_repo.get_lecture_by_id(lecture_id)
             if lecture and lecture.categories:
                 for category in lecture.categories:
                     await self.user_pref_repo.update_category_preference(
                         user_id=user_id, category_id=category.id
                     )
+
+            # 4. 관련 캐시 무효화
+            await self._clear_user_cache(user_id)
 
             logger.info(
                 f"[FEEDBACK] Recorded feedback: "
@@ -253,26 +300,18 @@ class RecommendationService:
         return recommendations
 
     async def train_model(self, force_retrain: bool = False) -> dict[str, Any]:
-        """
-        모델 학습 (비동기 처리)
-
-        Args:
-            force_retrain: 강제 재학습 여부
-
-        Returns:
-            학습 결과
-        """
+        """모델 학습"""
         try:
             # 데이터 로드
             matrix_bundle = await self.data_loader.load_training_data()
             if not matrix_bundle:
                 return {"status": "error", "message": "Failed to load training data"}
 
-            # 스레드 풀에서 동기 모델 학습 실행
-            loop = asyncio.get_event_loop()
-            success = await loop.run_in_executor(
-                self.executor, self.trainer.train_model, matrix_bundle
-            )
+            success = await asyncio.to_thread(self.trainer.train_model, matrix_bundle)
+
+            # 학습 성공 시 캐시 클리어
+            if success:
+                await self._clear_all_recommendation_cache()
 
             return {"status": "success" if success else "error", "model_version": "latest"}
 
@@ -281,10 +320,9 @@ class RecommendationService:
             return {"status": "error", "message": str(e)}
 
     async def get_model_info(self) -> dict[str, Any]:
-        """모델 정보 조회 (비동기 처리)"""
+        """모델 정보 조회"""
         try:
-            loop = asyncio.get_event_loop()
-            model_info = await loop.run_in_executor(self.executor, self.trainer.get_model_info)
+            model_info = await asyncio.to_thread(self.trainer.get_model_info)
             return model_info
         except Exception as e:
             logger.error(f"Failed to get model info: {e}")
@@ -294,3 +332,29 @@ class RecommendationService:
         """리소스 정리"""
         if hasattr(self, "executor"):
             self.executor.shutdown(wait=True)
+
+    async def _clear_user_cache(self, user_id: int) -> None:
+        """사용자 관련 캐시 클리어"""
+        try:
+            client = get_redis_client()
+            if client:
+                pattern = f"recommendations:{user_id}:*"
+                keys = client.keys(pattern)
+                if keys:
+                    client.delete(*keys)
+                    logger.info(f"Cleared {len(keys)} cache entries for user {user_id}")
+        except Exception as e:
+            logger.warning(f"Failed to clear user cache: {e}")
+
+    async def _clear_all_recommendation_cache(self) -> None:
+        """전체 추천 캐시 클리어 (모델 재학습 후)"""
+        try:
+            client = get_redis_client()
+            if client:
+                pattern = "recommendations:*"
+                keys = client.keys(pattern)
+                if keys:
+                    client.delete(*keys)
+                    logger.info(f"Cleared {len(keys)} recommendation cache entries")
+        except Exception as e:
+            logger.warning(f"Failed to clear recommendation cache: {e}")
