@@ -9,6 +9,7 @@ from scipy.sparse import csr_matrix
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
+    get_als_config,
     get_mlflow_service,
     get_monitoring_service,
     get_recommendation_service,
@@ -17,6 +18,7 @@ from app.infrastructure.database import get_async_db
 from app.schemas.recommendation import TrainingMetrics
 from app.services.mlflow.tracking import MLflowTrackingService
 from app.services.monitoring.prometheus import MLOpsMonitoring
+from app.services.recommendation.config import ALSConfig
 from app.services.recommendation.data_loader import ALSDataLoader
 from app.services.recommendation.model_trainer import ALSTrainer
 
@@ -68,10 +70,11 @@ async def train_model(
     db: AsyncSession = Depends(get_async_db),
     mlflow: MLflowTrackingService = Depends(get_mlflow_service),
     monitoring: MLOpsMonitoring = Depends(get_monitoring_service),
+    config: ALSConfig = Depends(get_als_config),
 ) -> TrainingMetrics | dict[str, str]:
     """ALS 모델 학습"""
     try:
-        trainer = ALSTrainer()
+        trainer = ALSTrainer(config=config)
         recommendation_service = get_recommendation_service(db)
 
         data_loader = ALSDataLoader(
@@ -80,6 +83,7 @@ async def train_model(
             bookmark_repo=recommendation_service.bookmark_repo,
             search_log_repo=recommendation_service.search_log_repo,
             user_pref_repo=recommendation_service.user_pref_repo,
+            config=config,
         )
 
         if full_training:

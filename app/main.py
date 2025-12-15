@@ -21,6 +21,7 @@ from app.core.exception import MLOpsError
 from app.infrastructure.database import async_engine
 from app.infrastructure.redis import is_redis_healthy, redis_client
 from app.services.mlflow.tracking import get_mlflow_tracking_service
+from app.services.recommendation.config import ALSConfig
 from app.services.recommendation.model_trainer import ALSTrainer
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 모델 로딩 시도
     try:
         logger.info("Loading ALS recommendation model...")
-        trainer = ALSTrainer()
+
+        config = ALSConfig()  # 앱 시작 시 기본 설정 사용
+
+        trainer = ALSTrainer(config=config)  # config 전달
 
         # 모델 로드 시도
         model_bundle = trainer.load_model()
@@ -107,7 +111,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 모델 리소스 정리
     try:
-        trainer = ALSTrainer()
+        config = ALSConfig()
+        trainer = ALSTrainer(config=config)
+
         # executor 정리
         if hasattr(trainer, "executor"):
             trainer.executor.shutdown(wait=True)
