@@ -29,7 +29,9 @@ async def get_recommendations(
 ) -> RecommendationList:
     """사용자 맞춤 강의 추천"""
     try:
-        recommendations = await service.get_recommendations(user_id=user_id, limit=request.limit)
+        recommendations = await service.get_recommendations(
+            user_id=user_id, num_recommendations=request.limit
+        )
 
         return RecommendationList(
             recommendations=recommendations,
