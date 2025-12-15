@@ -11,6 +11,7 @@ from mlflow.config import enable_async_logging
 from prometheus_client import Counter, Gauge, Histogram, Info
 
 from app.core.config import settings
+from app.services.recommendation.config import ALSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ mlflow_queue_size = Gauge("mlflow_queue_size", "Size of MLflow operation queue")
 
 
 class MLflowTrackingService:
-    """MLflow 추적 서비스 - 실험 관리 및 모델 버전 관리 (2025년 Prometheus 확장)"""
+    """MLflow 추적 서비스 - 실험 관리 및 모델 버전 관리"""
 
     def __init__(self, client: MlflowClient | None = None) -> None:
         """
@@ -113,7 +114,7 @@ class MLflowTrackingService:
 
         Args:
             client: 선택적 MLflow 클라이언트. 테스트 시 mock 객체 주입에 사용.
-                   제공되지 않으면 실제 클라이언트를 생성합니다.
+                   제공되지 않으면 실제 클라이언트를 생성.
         """
         self.tracking_uri: str = settings.mlflow_tracking_uri or "http://localhost:5001"
         self.experiment_name: str = settings.mlflow_experiment_name
@@ -316,6 +317,70 @@ class MLflowTrackingService:
                 return True
             except Exception as e:
                 logger.error(f"Failed to log metrics: {e}")
+                return False
+
+    def log_als_parameters(self, run_id: str, als_config: ALSConfig) -> bool:
+        """ALS 설정 파라미터 로깅"""
+        with self._track_operation("log_als_parameters"):
+            if not self._ensure_client():
+                return False
+
+            assert self.client is not None
+            try:
+                # ALSConfig에서 실험 파라미터 추출
+                experimental_params = als_config.experimental_params
+
+                # 파라미터 로깅
+                for key, value in experimental_params.items():
+                    self.client.log_param(run_id, f"als_{key}", value)
+
+                # 추가 ALS 설정 정보 로깅
+                self.client.log_param(run_id, "als_model_version", als_config.model_version)
+                self.client.log_param(
+                    run_id, "als_time_decay_enabled", als_config.time_decay_enabled
+                )
+                self.client.log_param(run_id, "als_half_life_days", als_config.half_life_days)
+
+                # 파라미터 수 메트릭 기록
+                total_params = (
+                    len(experimental_params) + 3
+                )  # model_version, time_decay_enabled, half_life_days
+                mlflow_parameters_total.labels(experiment_name="als_training").inc(total_params)
+
+                logger.info(f"Logged {total_params} ALS parameters to run {run_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to log ALS parameters: {e}")
+                return False
+
+    def log_als_experiment(
+        self,
+        run_id: str,
+        als_config: ALSConfig,
+        metrics: dict[str, float] | None = None,
+        tags: dict[str, str] | None = None,
+    ) -> bool:
+        """ALS 실험 전체 로깅 (파라미터 + 메트릭)"""
+        with self._track_operation("log_als_experiment"):
+            try:
+                # ALS 파라미터 로깅
+                if not self.log_als_parameters(run_id, als_config):
+                    return False
+
+                # 메트릭 로깅 (제공된 경우)
+                if metrics:
+                    if not self.log_metrics(run_id, metrics):
+                        return False
+
+                # 태그 추가 (제공된 경우)
+                if tags and self.client:
+                    for key, value in tags.items():
+                        self.client.set_tag(run_id, key, value)
+
+                logger.info(f"Successfully logged ALS experiment to run {run_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to log ALS experiment: {e}")
                 return False
 
     def log_model(

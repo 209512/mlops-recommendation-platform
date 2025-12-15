@@ -7,6 +7,7 @@ from typing import Any
 
 from app.infrastructure.redis import get_redis_client
 from app.schemas.recommendation import RecommendationResponse
+from app.services.recommendation.config import ALSConfig
 from app.services.recommendation.data_loader import ALSDataLoader
 from app.services.recommendation.model_trainer import ALSTrainer
 from app.services.recommendation.repositories import (
@@ -30,18 +31,20 @@ class RecommendationService:
         bookmark_repo: BookmarkRepository,
         search_log_repo: SearchLogRepository,
         user_pref_repo: UserPreferenceRepository,
+        config: ALSConfig,
     ):
         self.lecture_repo = lecture_repo
         self.user_repo = user_repo
         self.bookmark_repo = bookmark_repo
         self.search_log_repo = search_log_repo
         self.user_pref_repo = user_pref_repo
+        self.config = config
 
         # 데이터 로더, 트레이너 초기화
         self.data_loader = ALSDataLoader(
-            lecture_repo, user_repo, bookmark_repo, search_log_repo, user_pref_repo
+            lecture_repo, user_repo, bookmark_repo, search_log_repo, user_pref_repo, config
         )
-        self.trainer = ALSTrainer()
+        self.trainer = ALSTrainer(config)
 
         # 프로세스 풀 실행기 (CPU 집약적 작업용)
         self.executor = ProcessPoolExecutor(max_workers=4, mp_context=mp.get_context("spawn"))
@@ -56,6 +59,7 @@ class RecommendationService:
         """사용자 추천 목록 조회 (비동기 처리)"""
         try:
             # 캐시 확인
+            cache_timeout = self.config.lecture_category_map_timeout
             cache_key = f"recommendations:{user_id}:{num_recommendations}"
             cached = get_redis_client().get(cache_key)
 
@@ -69,9 +73,9 @@ class RecommendationService:
                 self._get_als_recommendations_sync, user_id, num_recommendations
             )
 
-            # 캐시 저장 (5분)
+            # 캐시 저장
             recommendations_dict = [rec.model_dump() for rec in recommendations]
-            get_redis_client().setex(cache_key, 300, json.dumps(recommendations_dict))
+            get_redis_client().setex(cache_key, cache_timeout, json.dumps(recommendations_dict))
 
             return recommendations
 
@@ -94,7 +98,7 @@ class RecommendationService:
             if user_idx is None:
                 return []
 
-            # matrix를 location에서 로드
+                # matrix를 location에서 로드
             matrix_location = model_bundle.get("matrix_location")
             if not matrix_location:
                 logger.error("[RECOMMENDATION] No matrix location in model bundle")
@@ -313,7 +317,10 @@ class RecommendationService:
             if success:
                 await self._clear_all_recommendation_cache()
 
-            return {"status": "success" if success else "error", "model_version": "latest"}
+            return {
+                "status": "success" if success else "error",
+                "model_version": self.config.model_version,
+            }
 
         except Exception as e:
             logger.error(f"[RECOMMENDATION] Model training failed: {e}", exc_info=True)

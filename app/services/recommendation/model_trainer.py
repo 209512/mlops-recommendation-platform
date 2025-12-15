@@ -3,7 +3,8 @@ import json
 import logging
 import os
 import time
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
+from urllib.parse import urlparse
 
 import implicit
 import mlflow
@@ -15,11 +16,7 @@ from scipy.sparse import csr_matrix, load_npz, save_npz
 
 from app.infrastructure.aws import get_s3_client
 from app.infrastructure.redis import get_redis_client
-from app.services.recommendation.constants import (
-    ALS_PARAMS,
-    LOCK_TIMEOUT_SECONDS,
-    MODEL_VERSION,
-)
+from app.services.recommendation.config import ALSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +84,7 @@ class ALSModelWrapper(PythonModel):
             else:
                 raise ValueError("Invalid input format")
 
-                # 사용자 ID를 인덱스로 변환
+            # 사용자 ID를 인덱스로 변환
             if user_id is None:
                 raise ValueError("user_id is required")
             user_idx = self.user_to_idx.get(int(user_id))
@@ -95,7 +92,7 @@ class ALSModelWrapper(PythonModel):
                 logger.warning(f"User {user_id} not found in model")
                 return {"lecture_ids": [], "scores": []}
 
-                # ALS 추천 생성
+            # ALS 추천 생성
             user_items: csr_matrix = csr_matrix(
                 ([1], ([0], [user_idx])), shape=(1, len(self.lecture_to_idx))
             )
@@ -120,7 +117,8 @@ class ALSModelWrapper(PythonModel):
 class ALSTrainer:
     """ALS 모델 트레이너 - 메모리 최적화 버전"""
 
-    def __init__(self) -> None:
+    def __init__(self, config: ALSConfig) -> None:
+        self.config = config
         self.redis_client = get_redis_client()
         self.model: implicit.als.AlternatingLeastSquares | None = None
         self._s3_client: S3Client | None = None
@@ -145,12 +143,12 @@ class ALSTrainer:
         """ALS 모델 학습 - 메모리 최적화"""
         try:
             # 분산 락 획득
-            lock_key = f"als_training_lock_{MODEL_VERSION}"
-            if not self._acquire_lock(lock_key, LOCK_TIMEOUT_SECONDS):
+            lock_key = f"als_training_lock_{self.config.model_version}"
+            if not self._acquire_lock(lock_key, self.config.lock_timeout_seconds):
                 logger.warning("[TRAINER] Training already in progress")
                 return False
 
-                # 데이터 추출
+            # 데이터 추출
             matrix = matrix_bundle["matrix"]
             users = matrix_bundle["users"]
             lectures = matrix_bundle["lectures"]
@@ -159,10 +157,10 @@ class ALSTrainer:
 
             # ALS 모델 생성 및 학습
             self.model = implicit.als.AlternatingLeastSquares(
-                factors=ALS_PARAMS.factors,
-                regularization=ALS_PARAMS.regularization,
-                iterations=ALS_PARAMS.iterations,
-                calculate_training_loss=ALS_PARAMS.calculate_training_loss,
+                factors=self.config.factors,
+                regularization=self.config.regularization,
+                iterations=self.config.iterations,
+                calculate_training_loss=self.config.calculate_training_loss,
                 use_gpu=False,  # CPU 버전으로 구현
             )
 
@@ -230,7 +228,7 @@ class ALSTrainer:
                     ]
                     existing_model.partial_fit_users(new_user_indices, user_data)
 
-                    # 새 강의 증분 학습
+            # 새 강의 증분 학습
             if new_lectures:
                 new_lecture_indices = [
                     existing_lecture_to_idx.get(lid, -1)
@@ -356,8 +354,8 @@ class ALSTrainer:
                 # 파라미터 로깅
                 mlflow.log_params(
                     {
-                        "factors": ALS_PARAMS.factors,
-                        "iterations": ALS_PARAMS.iterations,
+                        "factors": self.config.factors,
+                        "iterations": self.config.iterations,
                         "user_count": len(model_bundle["users"]),
                         "lecture_count": len(model_bundle["lectures"]),
                     }
@@ -459,52 +457,61 @@ class ALSTrainer:
             bucket_name = os.getenv("MODEL_BUCKET_NAME", "mlops-models")
 
             # S3 URL에서 key 추출
-            key = s3_url.replace(f"s3://{bucket_name}/", "")
+            parsed_url = urlparse(s3_url)
+            key = parsed_url.path.lstrip("/")
 
             # S3에서 파일 다운로드
             response = s3_client.get_object(Bucket=bucket_name, Key=key)
-            buffer = io.BytesIO(response["Body"].read())
+            file_bytes = response["Body"].read()
 
-            # matrix 로드
-            matrix = load_npz(buffer)
-            return csr_matrix(matrix) if matrix is not None else None
+            # BytesIO를 통해 npz 로드
+            file_obj = io.BytesIO(file_bytes)
+            matrix = load_npz(file_obj)
+
+            result: csr_matrix = cast(csr_matrix, matrix)
+            logger.info(f"[TRAINER] Matrix loaded from S3: {s3_url}")
+            return result
 
         except Exception as e:
             logger.error(f"[TRAINER] Failed to load matrix from S3: {e}")
             return None
 
     def _load_matrix_from_local(self, file_path: str) -> csr_matrix | None:
-        """로컬 파일 시스템에서 matrix 로드"""
+        """로컬에서 matrix 로드"""
         try:
-            if not os.path.exists(file_path):
-                logger.warning(f"[TRAINER] Matrix file not found: {file_path}")
-                return None
-
-            result = load_npz(file_path)
-            return csr_matrix(result) if result is not None else None
-
+            matrix = load_npz(file_path)
+            result: csr_matrix = cast(csr_matrix, matrix)
+            return result
         except Exception as e:
-            logger.error(f"[TRAINER] Failed to load matrix locally: {e}")
+            logger.error(f"[TRAINER] Failed to load matrix from {file_path}: {e}")
             return None
 
     def _acquire_lock(self, lock_key: str, timeout: int) -> bool:
         """분산 락 획득"""
-        for _attempt in range(3):
-            acquired = self.redis_client.set(lock_key, "locked", nx=True, ex=timeout)
-            if acquired:
-                return True
-            time.sleep(0.1)
-        return False
+        try:
+            if self.redis_client:
+                result = self.redis_client.set(lock_key, "locked", ex=timeout, nx=True)
+                return bool(result)
+            return True  # Redis가 없으면 락 없이 진행
+        except Exception as e:
+            logger.error(f"[TRAINER] Failed to acquire lock: {e}")
+            return False
 
     def _release_lock(self, lock_key: str) -> None:
         """분산 락 해제"""
-        self.redis_client.delete(lock_key)
+        try:
+            if self.redis_client:
+                self.redis_client.delete(lock_key)
+        except Exception as e:
+            logger.error(f"[TRAINER] Failed to release lock: {e}")
 
     def _save_metadata(self, metadata: dict[str, Any]) -> None:
-        """메타데이터를 Redis에 저장 (matrix 제외)"""
+        """메타데이터를 Redis에 저장"""
         try:
             metadata_json = json.dumps(metadata, default=str)
-            self.redis_client.set(f"als_metadata_{MODEL_VERSION}", metadata_json, ex=86400)
+            self.redis_client.set(
+                f"als_metadata_{self.config.model_version}", metadata_json, ex=86400
+            )
         except Exception as e:
             logger.error(f"[TRAINER] Failed to save metadata: {e}")
             raise
@@ -512,7 +519,7 @@ class ALSTrainer:
     def _load_metadata(self) -> dict[str, Any] | None:
         """Redis에서 메타데이터 로드"""
         try:
-            metadata_json = self.redis_client.get(f"als_metadata_{MODEL_VERSION}")
+            metadata_json = self.redis_client.get(f"als_metadata_{self.config.model_version}")
             if not metadata_json:
                 return None
             result: dict[str, Any] = json.loads(metadata_json)

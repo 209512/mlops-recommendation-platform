@@ -8,14 +8,7 @@ import numpy as np
 from scipy.sparse import csr_matrix
 
 from app.infrastructure.redis import get_redis_client
-from app.services.recommendation.constants import (
-    HALF_LIFE_DAYS,
-    LECTURE_CATEGORY_MAP_CACHE_KEY,
-    LECTURE_CATEGORY_MAP_TIMEOUT,
-    MODEL_VERSION,
-    SEARCH_LOG_DAYS_LIMIT,
-    USER_INTERACTION_WEIGHTS,
-)
+from app.services.recommendation.config import ALSConfig
 from app.services.recommendation.repositories import (
     BookmarkRepository,
     LectureRepository,
@@ -31,9 +24,9 @@ MatrixBundle = dict[str, np.ndarray | csr_matrix | list[int] | list[str]]
 MatrixBundleExtended = dict[str, np.ndarray | csr_matrix | list[int] | list[str] | datetime]
 
 
-def _calculate_time_decay(days_passed: float) -> float:
+def _calculate_time_decay(days_passed: float, config: ALSConfig) -> float:
     """시간 감쇠 계산"""
-    return float(0.5 ** (days_passed / HALF_LIFE_DAYS))
+    return float(0.5 ** (days_passed / config.half_life_days))
 
 
 class ALSDataLoader:
@@ -46,27 +39,32 @@ class ALSDataLoader:
         bookmark_repo: BookmarkRepository,
         search_log_repo: SearchLogRepository,
         user_pref_repo: UserPreferenceRepository,
+        config: ALSConfig,
     ):
         self.lecture_repo = lecture_repo
         self.user_repo = user_repo
         self.bookmark_repo = bookmark_repo
         self.search_log_repo = search_log_repo
         self.user_pref_repo = user_pref_repo
+        self.config = config
         self.redis_client = get_redis_client()
-        self.lock_key = f"als_training_lock_{MODEL_VERSION}"
+        self.lock_key = f"als_training_lock_{self.config.model_version}"
 
     async def load_training_data(
-        self, cutoff_days: int = SEARCH_LOG_DAYS_LIMIT
+        self, cutoff_days: int | None = None
     ) -> MatrixBundleExtended | None:
         """
         학습용 데이터 로드
 
         Args:
-            cutoff_days: 데이터 컷오프 기간
+            cutoff_days: 데이터 컷오프 기간 (None이면 config 기본값 사용)
 
         Returns:
             매트릭스 번들 또는 None
         """
+        if cutoff_days is None:
+            cutoff_days = self.config.search_log_days_limit
+
         try:
             return await _build_user_item_matrix(
                 self.lecture_repo,
@@ -75,6 +73,7 @@ class ALSDataLoader:
                 self.search_log_repo,
                 self.user_pref_repo,
                 cutoff_days,
+                self.config,
             )
         except Exception as e:
             logger.error(f"[DATA_LOADER] Failed to load training data: {e}", exc_info=True)
@@ -88,12 +87,13 @@ class ALSDataLoader:
             {lecture_id: [category_names]}
         """
         try:
-            # 캐시 확인
-            cached = self.redis_client.get(LECTURE_CATEGORY_MAP_CACHE_KEY)
+            # 캐시 확인 - 캐시 키를 동적으로 생성
+            cache_key = f"lecture_category_map_{self.config.model_version}"
+            cached = self.redis_client.get(cache_key)
             if cached:
                 return dict(json.loads(cached))
 
-            # 데이터 조회
+                # 데이터 조회
             # 빈 리스트로 모든 강의 카테고리 조회
             lecture_categories = await self.lecture_repo.get_lecture_categories([])
 
@@ -103,10 +103,10 @@ class ALSDataLoader:
                 for name in category_name:
                     category_map[lecture_id].append(name)
 
-            # 캐시 저장
+                    # 캐시 저장
             self.redis_client.setex(
-                LECTURE_CATEGORY_MAP_CACHE_KEY,
-                LECTURE_CATEGORY_MAP_TIMEOUT,
+                cache_key,
+                self.config.lecture_category_map_timeout,
                 json.dumps(dict(category_map)),
             )
 
@@ -162,6 +162,7 @@ async def _build_user_item_matrix(
     search_log_repo: SearchLogRepository,
     user_pref_repo: UserPreferenceRepository,
     cutoff_days: int,
+    config: ALSConfig,
 ) -> MatrixBundleExtended | None:
     """
     사용자-아이템 상호작용 행렬 구축
@@ -173,6 +174,7 @@ async def _build_user_item_matrix(
         search_log_repo: 검색로그 Repository
         user_pref_repo: 사용자 선호도 Repository
         cutoff_days: 컷오프 기간
+        config: ALS 설정
 
     Returns:
         확장된 매트릭스 번들 또는 None (상호작용이 없는 경우)
@@ -198,15 +200,15 @@ async def _build_user_item_matrix(
         bookmark_lecture_id = int(bookmark.lecture_id)
 
         if bookmark_user_id in user_id_map and bookmark_lecture_id in lecture_id_map:
-            weight = USER_INTERACTION_WEIGHTS["bookmark"]
+            weight = config.interaction_weights["bookmark"]  # 수정된 속성명 사용
             days_old = (current_time - bookmark.created_at).days
-            decayed_weight = weight * _calculate_time_decay(days_old)
+            decayed_weight = weight * _calculate_time_decay(days_old, config)
 
             interactions.append(
                 (user_id_map[bookmark_user_id], lecture_id_map[bookmark_lecture_id], decayed_weight)
             )
 
-    # 검색 상호작용 - 모든 사용자 검색 상호작용 조회
+            # 검색 상호작용 - 모든 사용자 검색 상호작용 조회
     search_interactions = await search_log_repo.get_all_search_interactions(days=cutoff_days)
     for user_id, lecture_id, weight in search_interactions:
         search_user_id = int(user_id)
@@ -217,7 +219,7 @@ async def _build_user_item_matrix(
                 (user_id_map[search_user_id], lecture_id_map[search_lecture_id], float(weight))
             )
 
-    # 3. 희소 행렬 생성
+            # 3. 희소 행렬 생성
     if not interactions:
         logger.warning("[DATA_LOADER] No interactions found")
         return None

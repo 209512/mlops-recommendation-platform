@@ -12,6 +12,7 @@ from app.services.mlflow import MLflowTrackingService
 from app.services.mlflow.tracking import get_mlflow_tracking_service
 from app.services.monitoring import MLOpsMonitoring
 from app.services.monitoring.prometheus import get_monitoring_service as _get_monitoring_service
+from app.services.recommendation.config import ALSConfig, als_config
 from app.services.recommendation.repositories import (
     BookmarkRepository,
     LectureRepository,
@@ -27,7 +28,21 @@ logger = logging.getLogger(__name__)
 security_scheme = HTTPBearer(auto_error=False)
 
 
-def get_recommendation_service(db: AsyncSession = Depends(get_async_db)) -> RecommendationService:
+def get_als_config() -> ALSConfig:
+    """ALS 설정 의존성 주입"""
+    try:
+        return als_config
+    except Exception as e:
+        logger.error(f"Failed to load ALS configuration: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="ALS configuration unavailable",
+        ) from e
+
+
+def get_recommendation_service(
+    db: AsyncSession = Depends(get_async_db), config: ALSConfig = Depends(get_als_config)
+) -> RecommendationService:
     """추천 서비스 의존성 주입"""
     lecture_repo = LectureRepository(db)
     user_repo = UserRepository(db)
@@ -36,11 +51,7 @@ def get_recommendation_service(db: AsyncSession = Depends(get_async_db)) -> Reco
     user_pref_repo = UserPreferenceRepository(db)
 
     return RecommendationService(
-        lecture_repo=lecture_repo,
-        user_repo=user_repo,
-        bookmark_repo=bookmark_repo,
-        search_log_repo=search_log_repo,
-        user_pref_repo=user_pref_repo,
+        lecture_repo, user_repo, bookmark_repo, search_log_repo, user_pref_repo, config
     )
 
 
@@ -75,7 +86,7 @@ async def get_current_user_id(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-        # JWT 토큰 검증
+    # JWT 토큰 검증
     try:
         token = credentials.credentials
         payload = security.verify_token(token)

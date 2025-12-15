@@ -22,6 +22,7 @@ from app.infrastructure.database import get_async_db
 from app.infrastructure.redis import get_redis_client
 from app.schemas import RecommendationResponse
 from app.services.mlflow.tracking import get_mlflow_tracking_service
+from app.services.recommendation.config import ALSConfig
 from app.services.recommendation.data_loader import ALSDataLoader
 from app.services.recommendation.repositories import (
     BookmarkRepository,
@@ -183,6 +184,7 @@ def train_als_model(
     """ALS 모델 학습 Celery 태스크 - 안정성 강화"""
     run_id = None
     mlflow_service = None
+    config = ALSConfig()  # ALSConfig 인스턴스 생성
 
     try:
         # 데이터 로더 초기화 위한 비동기 컨텍스트
@@ -197,6 +199,7 @@ def train_als_model(
                     bookmark_repo=BookmarkRepository(db),
                     search_log_repo=SearchLogRepository(db),
                     user_pref_repo=UserPreferenceRepository(db),
+                    config=config,  # config 전달
                 )
 
                 # 사용자-아이템 행렬 로드
@@ -208,16 +211,17 @@ def train_als_model(
             finally:
                 await db_gen.aclose()
 
-        # 데이터 로드 실행
+                # 데이터 로드 실행
+
         matrix_bundle = asyncio.run(_train_model())
         user_item_matrix = matrix_bundle["matrix"]
 
         # ALS 모델 초기화 및 학습
         als_model = implicit.als.AlternatingLeastSquares(
-            factors=getattr(settings, "als_factors", 100),
-            regularization=getattr(settings, "als_regularization", 0.01),
-            iterations=getattr(settings, "als_iterations", 15),
-            calculate_training_loss=True,
+            factors=config.factors,  # config에서 가져오기
+            regularization=config.regularization,  # config에서 가져오기
+            iterations=config.iterations,  # config에서 가져오기
+            calculate_training_loss=config.calculate_training_loss,  # config에서 가져오기
             random_state=42,  # 재현성을 위한 랜덤 시드
         )
 
@@ -234,7 +238,7 @@ def train_als_model(
         if not mlflow_service:
             raise RuntimeError("MLflow service not available")
 
-        # 실험 생성
+            # 실험 생성
         experiment_id = mlflow_service.create_experiment(
             name=experiment_name,
             tags={
@@ -325,6 +329,8 @@ def generate_recommendations(
     num_recommendations: int = 10,
 ) -> dict[str, Any]:
     """사용자 추천 생성 - 안정성 강화"""
+    config = ALSConfig()  # ALSConfig 인스턴스 생성
+
     try:
         # 입력값 검증
         if user_id <= 0:
@@ -333,7 +339,8 @@ def generate_recommendations(
         if num_recommendations <= 0 or num_recommendations > 100:
             raise ValueError(f"Invalid num_recommendations: {num_recommendations}")
 
-        # 비동기 컨텍스트 매니저 사용
+            # 비동기 컨텍스트 매니저 사용
+
         async def _generate_recommendations() -> list[RecommendationResponse] | dict[str, Any]:
             db_gen = get_async_db()
             db = await db_gen.__anext__()
@@ -345,6 +352,7 @@ def generate_recommendations(
                     bookmark_repo=BookmarkRepository(db),
                     search_log_repo=SearchLogRepository(db),
                     user_pref_repo=UserPreferenceRepository(db),
+                    config=config,  # config 전달
                 )
 
                 # 추천 생성
@@ -356,7 +364,8 @@ def generate_recommendations(
             finally:
                 await db_gen.aclose()
 
-        # 비동기 함수 실행
+                # 비동기 함수 실행
+
         recommendations = asyncio.run(_generate_recommendations())
 
         logger.info(
@@ -419,7 +428,8 @@ def update_user_preferences(
         if not isinstance(preference_score, (int, float)) or not 0 <= preference_score <= 1:
             raise ValueError(f"Invalid preference_score: {preference_score}")
 
-        # 비동기 처리를 위한 래퍼
+            # 비동기 처리를 위한 래퍼
+
         async def _update_preferences() -> bool:
             db_gen = get_async_db()
             db = await db_gen.__anext__()
@@ -441,7 +451,8 @@ def update_user_preferences(
             finally:
                 await db_gen.aclose()
 
-        # 비동기 실행
+                # 비동기 실행
+
         success: bool = asyncio.run(_update_preferences())
 
         if success:
@@ -515,137 +526,74 @@ def batch_recommendations(
                 result = generate_recommendations.apply_async(args=(user_id, num_recommendations))
 
                 if result.ready() and result.successful():
-                    result_data = result.get()
-                    if result_data and result_data.get("status") == "success":
-                        successful_count += 1
-                        results.append(result_data)
-                    else:
-                        failed_count += 1
-                        results.append(
-                            {"status": "error", "error": "Task failed", "user_id": user_id}
-                        )
+                    recommendations = result.get()
+                    results.append(
+                        {
+                            "user_id": user_id,
+                            "status": "success",
+                            "recommendations": recommendations,
+                        }
+                    )
+                    successful_count += 1
                 else:
+                    results.append(
+                        {"user_id": user_id, "status": "failed", "error": "Task failed or timeout"}
+                    )
                     failed_count += 1
 
             except Exception as e:
-                error_msg = f"Failed to generate recommendations for user {user_id}: {str(e)}"
-                logger.error(error_msg, task_id=self.request.id)
-
-                failed_result: dict[str, Any] = {
-                    "status": "error",
-                    "error": str(e),
-                    "user_id": user_id,
-                }
-                results.append(failed_result)
+                logger.error(f"[TASKS] Failed to generate recommendations for user {user_id}: {e}")
+                results.append({"user_id": user_id, "status": "error", "error": str(e)})
                 failed_count += 1
 
-        logger.info(
-            "Batch recommendations completed",
-            total_users=len(user_ids),
-            successful=successful_count,
-            failed=failed_count,
-            task_id=self.request.id,
-        )
-
-        return {
-            "status": "success",
+        # 결과 요약
+        summary = {
             "total_users": len(user_ids),
-            "successful_count": successful_count,
-            "failed_count": failed_count,
+            "successful": successful_count,
+            "failed": failed_count,
             "results": results,
-            "task_id": self.request.id,
         }
+
+        logger.info(f"[TASKS] Batch recommendations completed: {summary}")
+        return summary
 
     except Exception as e:
-        logger.error(
-            "Batch recommendations failed",
-            error=str(e),
-            total_users=len(user_ids) if "user_ids" in locals() else 0,
-            task_id=self.request.id,
-            exc_info=True,
-        )
-
-        # 재시도 가능한 예외인 경우
-        if isinstance(e, (ConnectionError, TimeoutError)):
-            raise self.retry(exc=e, countdown=60 * (self.request.retries + 1)) from e
-
-        return {
-            "status": "error",
-            "error": str(e),
-            "total_users": len(user_ids) if "user_ids" in locals() else 0,
-            "task_id": self.request.id,
-        }
+        logger.error(f"[TASKS] Batch recommendations failed: {e}")
+        return {"status": "error", "error": str(e), "task_id": self.request.id}
 
 
 @current_app.task(bind=True, base=BaseTask, name="cleanup_expired_cache")
-def cleanup_expired_cache(
-    self: BaseTask,
-    pattern: str = "recommendations:*",
-    max_keys: int = 1000,
-) -> dict[str, Any]:
-    """만료된 캐시 정리 - 안정성 강화"""
+def cleanup_expired_cache(self: BaseTask) -> dict[str, Any]:
+    """만료된 캐시 정리"""
     try:
-        # 입력값 검증
-        if not pattern:
-            raise ValueError("pattern cannot be empty")
+        client = get_redis_client()
+        if not client:
+            raise Exception("Redis client not available")
 
-        if max_keys <= 0 or max_keys > 10000:
-            raise ValueError(f"Invalid max_keys: {max_keys}")
+        # 추천 캐시 패턴으로 키 검색
+        pattern = "recommendations:*"
+        keys = client.keys(pattern)
 
-        # 비동기 처리를 위한 래퍼
-        async def _cleanup_cache() -> int:
-            redis_client = get_redis_client()
+        cleaned_count = 0
+        if keys:
+            # TTL이 없는 키들만 정리 (오래된 데이터)
+            for key in keys:
+                ttl = client.ttl(key)
+                if ttl == -1:  # TTL이 설정되지 않은 키
+                    client.delete(key)
+                    cleaned_count += 1
 
-            # 패턴으로 키 찾기
-            keys = redis_client.keys(pattern)
-
-            if len(keys) > max_keys:
-                keys = keys[:max_keys]
-                logger.warning(f"Limiting cleanup to {max_keys} keys out of {len(keys)} found")
-
-            # 키 삭제
-            if keys:
-                deleted_count = int(redis_client.delete(*keys))
-                return deleted_count
-
-            return 0
-
-        # 비동기 실행
-        deleted_count: int = asyncio.run(_cleanup_cache())
-
-        logger.info(
-            "Cache cleanup completed",
-            pattern=pattern,
-            deleted_count=deleted_count,
-            task_id=self.request.id,
-        )
+            logger.info(f"[TASKS] Cleaned up {cleaned_count} expired cache entries")
 
         return {
             "status": "success",
-            "pattern": pattern,
-            "deleted_count": deleted_count,
-            "task_id": self.request.id,
+            "cleaned_count": cleaned_count,
+            "total_keys": len(keys) if keys else 0,
         }
 
     except Exception as e:
-        logger.error(
-            "Failed to cleanup cache",
-            pattern=pattern,
-            error=str(e),
-            task_id=self.request.id,
-            exc_info=True,
-        )
-
-        # 재시도 가능한 예외인 경우
-        if isinstance(e, (ConnectionError, TimeoutError)):
-            raise self.retry(exc=e, countdown=60 * (self.request.retries + 1)) from e
-
-        return {
-            "status": "error",
-            "error": str(e),
-            "pattern": pattern,
-            "task_id": self.request.id,
-        }
+        logger.error(f"[TASKS] Cache cleanup failed: {e}")
+        return {"status": "error", "error": str(e), "task_id": self.request.id}
 
 
 # Celery 설정 강화
