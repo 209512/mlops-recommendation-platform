@@ -1,16 +1,31 @@
-from typing import Literal
+import os
+import secrets
+from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import Field
+from cryptography.fernet import Fernet
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_SECRET_KEYS = [
+    "default-secret-key",
+    "your-secret-key-here-change-in-production",
+    "dev-insecure-key",
+]
+
+MIN_SECRET_KEY_LENGTH = 32
+DEFAULT_SESSION_TIMEOUT = 30
+DEFAULT_LOGIN_ATTEMPTS = 5
+DEFAULT_LOCKOUT_DURATION = 15
 
 
 class Settings(BaseSettings):
-    """현대적 설정 관리 - 타입 안전성과 환경 변수 자동 바인딩"""
+    """현대적 설정 관리"""
 
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,
-        extra="ignore",  # 추가 환경 변수 무시
+        extra="ignore",
     )
 
     # 환경 타입
@@ -22,6 +37,39 @@ class Settings(BaseSettings):
     version: str = "0.1.0"
     secret_key: str = Field(...)
     log_level: str = "INFO"
+
+    # 기본 암호화 키
+    encryption_key: str | None = Field(
+        default=None, description="Fernet 암호화 키 (자동 생성 가능)"
+    )
+
+    # 키 파일 경로
+    encryption_key_file: Path | None = Field(default=None, description="암호화 키 저장 파일 경로")
+
+    # 키 로테이션 설정
+    key_rotation_enabled: bool = Field(default=False, description="암호화 키 자동 로테이션 활성화")
+
+    key_rotation_days: int = Field(default=90, description="키 로테이션 주기 (일)")
+
+    # 키 백업 설정
+    key_backup_enabled: bool = Field(default=False, description="암호화 키 백업 활성화")
+
+    key_backup_path: Path | None = Field(default=None, description="키 백업 저장 경로")
+
+    # 보안 설정
+    require_https: bool = Field(default=False, description="HTTPS 강제 요구")
+
+    session_timeout_minutes: int = Field(
+        default=DEFAULT_SESSION_TIMEOUT, description="세션 타임아웃 (분)"
+    )
+
+    max_login_attempts: int = Field(
+        default=DEFAULT_LOGIN_ATTEMPTS, description="최대 로그인 시도 횟수"
+    )
+
+    lockout_duration_minutes: int = Field(
+        default=DEFAULT_LOCKOUT_DURATION, description="계정 잠금 지속 시간 (분)"
+    )
 
     # Database
     database_url: str = Field(...)
@@ -73,6 +121,112 @@ class Settings(BaseSettings):
     sonar_host_url: str = Field(...)
     sonar_token: str = Field(...)
 
+    @field_validator("secret_key")
+    @classmethod
+    def validate_secret_key(cls, v: str, info: ValidationInfo) -> str:
+        """시크릿 키 검증"""
+        if not v:
+            raise ValueError("SECRET_KEY는 비어있을 수 없습니다")
+
+        if len(v) < MIN_SECRET_KEY_LENGTH:
+            raise ValueError(f"SECRET_KEY는 최소 {MIN_SECRET_KEY_LENGTH}자 이상이어야 합니다")
+
+        # 기본 키 사용 방지
+        if v in DEFAULT_SECRET_KEYS:
+            if info.data.get("environment") == "production":
+                raise ValueError("프로덕션 환경에서는 기본 SECRET_KEY를 사용할 수 없습니다")
+
+        return v
+
+    @field_validator("encryption_key")
+    @classmethod
+    def validate_encryption_key(cls, v: str | None) -> str | None:
+        """암호화 키 검증"""
+        if v is not None:
+            try:
+                Fernet(v.encode())
+            except Exception:
+                raise ValueError("유효하지 않은 Fernet 암호화 키입니다") from None
+        return v
+
+    def get_encryption_key(self) -> str:
+        """암호화 키 가져오기 또는 생성"""
+        if self.encryption_key:
+            return self.encryption_key
+
+        # 파일에서 키 읽음
+        if self.encryption_key_file and self.encryption_key_file.exists():
+            with open(self.encryption_key_file, "rb") as f:
+                key = f.read().decode()
+            return key
+
+        # 새 키 생성
+        key = Fernet.generate_key().decode()
+
+        # 파일에 저장
+        if self.encryption_key_file:
+            self.encryption_key_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.encryption_key_file, "wb") as f:
+                f.write(key.encode())
+            os.chmod(self.encryption_key_file, 0o600)
+
+        return key
+
+    def rotate_encryption_key(self) -> str:
+        """암호화 키 로테이션"""
+        if not self.key_rotation_enabled:
+            raise ValueError("키 로테이션이 비활성화되어 있습니다.")
+
+        # 기존 키 백업
+        if self.key_backup_enabled and self.key_backup_path:
+            old_key = self.get_encryption_key()
+            backup_file = self.key_backup_path / f"encryption_key_{secrets.token_hex(8)}.key"
+            backup_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(backup_file, "wb") as f:
+                f.write(old_key.encode())
+            os.chmod(backup_file, 0o600)
+
+        # 새 키 생성
+        new_key = Fernet.generate_key().decode()
+
+        # 파일에 저장
+        if self.encryption_key_file:
+            with open(self.encryption_key_file, "wb") as f:
+                f.write(new_key.encode())
+
+        return new_key
+
+    def get_security_config(self) -> dict[str, Any]:
+        """환경별 보안 설정 반환"""
+        base_config = {
+            "require_https": self.require_https,
+            "session_timeout": self.session_timeout_minutes,
+            "max_login_attempts": self.max_login_attempts,
+            "lockout_duration": self.lockout_duration_minutes,
+        }
+
+        # 환경별 설정 조정
+        if self.is_production:
+            base_config.update(
+                {
+                    "require_https": True,
+                    "session_timeout": 15,
+                    "max_login_attempts": 3,
+                    "lockout_duration": 30,
+                }
+            )
+        elif self.is_test:
+            base_config.update(
+                {
+                    "require_https": False,
+                    "session_timeout": 120,
+                    "max_login_attempts": 100,
+                    "lockout_duration": 1,
+                }
+            )
+
+        return base_config
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
@@ -80,6 +234,8 @@ class Settings(BaseSettings):
     @property
     def is_test(self) -> bool:
         return self.environment == "test"
+
+    # 전역 설정 인스턴스
 
 
 settings = Settings()
