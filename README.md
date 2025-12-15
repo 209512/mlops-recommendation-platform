@@ -1,353 +1,326 @@
-Here is the English translation of the provided Korean README content. 🌍
-
 # MLOps Recommendation Platform
 
-A **production-ready, enterprise-grade MLOps recommendation system** that implements a high-performance recommendation API service based on **FastAPI**, utilizes the **implicit** library for the ALS algorithm, and provides a complete MLOps pipeline.
+A production-ready FastAPI-based ALS recommendation system with a complete MLOps pipeline.
 
------
+## 🚀 Key Features
 
-## 🏗️ Architecture
+- **ALS-based Recommendation System**: Collaborative filtering using the Implicit library
+- **Complete MLOps Pipeline**: MLflow experiment tracking, Kubeflow pipeline automation
+- **Real-time Monitoring**: Prometheus + Grafana dashboards
+- **Asynchronous Processing**: Celery for background tasks
+- **Containerization**: Multi-stage Docker builds
+- **Cloud Deployment**: Kubernetes deployment with HPA auto-scaling
 
-The project follows **Clean Architecture** principles and applies clear separation of concerns:
+## 📋 System Requirements
 
-```
-app/
-├── api/                   # REST API Endpoints
-│   ├── dependencies.py    # Dependency Injection (with lazy loading)
-│   ├── middleware.py      # Custom Middleware
-│   └── v1/                # API Version 1
-│       ├── recommendations.py # Recommendation Endpoints
-│       ├── training.py        # Model Training Endpoints
-│       └── monitoring.py      # Health Check Endpoints
-├── core/                  # Core Application Logic
-│   ├── config.py          # Environment Configuration
-│   ├── exception.py       # Custom Exception Handling
-│   └── security.py        # Security Utilities
-├── models/                # SQLAlchemy Data Models
-│   ├── base.py            # Base Model Class
-│   ├── lecture.py         # Lecture Model (using Association Object Pattern)
-│   └── user.py            # User Model
-├── schemas/               # Pydantic Schemas
-├── services/              # Business Logic
-│   ├── recommendation/    # Recommendation Service
-│   │   ├── service.py     # Recommendation Business Logic
-│   │   ├── repositories/  # Data Access Layer
-│   │   ├── data_loader.py # ALS Data Loader
-│   │   ├── model_trainer.py # ALS Model Trainer
-│   │   └── tasks.py       # Celery Background Tasks
-│   └── mlflow/            # MLflow Service
-│       ├── tracking.py    # Model Tracking Service
-│       └── tasks.py       # MLflow Related Tasks
-└── infrastructure/        # Infrastructure Layer
-    ├── database.py        # Asynchronous Database Configuration
-    ├── redis.py           # Redis Client
-    └── celery.py          # Celery Configuration
-```
-
------
+- Python 3.11+
+- Docker & Docker Compose
+- PostgreSQL 15+
+- Redis 7+
+- Kubernetes (for production deployment)
 
 ## 🛠️ Tech Stack
 
-### Backend Framework
+### Backend
+- **FastAPI**: Web framework
+- **SQLAlchemy 2.0**: ORM
+- **Pydantic**: Data validation
+- **Alembic**: Database migrations
 
-  - **FastAPI**: Modern, asynchronous web framework.
-  - **SQLAlchemy 2.0**: Asynchronous ORM.
-  - **Pydantic v2**: Data validation and serialization.
+### Machine Learning
+- **Implicit**: ALS recommendation algorithm
+- **SciPy**: Numerical computing
+- **NumPy**: Array processing
+- **MLflow**: Experiment tracking and model registry
 
-### Recommendation Algorithm
+### Infrastructure
+- **PostgreSQL**: Primary database
+- **Redis**: Cache and Celery broker
+- **Celery**: Asynchronous task queue
+- **AWS S3**: Model artifact storage
 
-  - **Implicit Library**: Implementation of the **ALS (Alternating Least Squares)** algorithm.
-  - **ALS (Alternating Least Squares)**: Collaborative Filtering for implicit feedback.
+### Monitoring
+- **Prometheus**: Metrics collection
+- **Grafana**: Visualization dashboards
+- **Prometheus Client**: Application metrics
 
-### MLOps Pipeline
-
-  - **MLflow**: Model experiment tracking and management.
-  - **Kubeflow**: ML workflow orchestration.
-  - **Celery**: Distributed task queue for background processing.
-
-### Database & Caching
-
-  - **PostgreSQL**: Primary data store.
-  - **Redis**: Caching and Celery broker.
-
-### Monitoring & Logging
-
-  - **Prometheus**: Metrics collection.
-  - **Grafana**: Visualization dashboard.
-  - **SonarQube**: Code quality analysis.
-
-### Cloud & Deployment
-
-  - **Kubernetes**: Container orchestration.
-  - **AWS**: EKS, RDS, ElastiCache.
-  - **Docker**: Containerization.
-
------
-
-## ⚙️ Configuration
-
-The project manages configuration using environment variables via a `.env` file. Copy the `.env.example` file to `.env` and configure the necessary values.
-
-### Required Environment Variables
-
-**Database Settings**
-
-```bash
-DATABASE_URL="postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/mlops"
-DB_HOST=db
-DB_PORT=5432
-DB_NAME=mlops
-DB_USER=postgres
-POSTGRES_PASSWORD=secure_password_change_in_production
-```
-
-**Redis Settings**
-
-```bash
-REDIS_HOST=redis
-REDIS_PORT=6379
-REDIS_URL="redis://redis:6379/0"
-```
-
-**MLflow Settings**
-
-```bash
-MLFLOW_TRACKING_URI=http://mlflow:5001
-MLFLOW_EXPERIMENT_NAME=als_recommendation
-MLFLOW_BACKEND_STORE_URI="postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/mlflow"
-MLFLOW_DEFAULT_ARTIFACT_ROOT=./mlruns
-```
-
-**FastAPI Settings**
-
-```bash
-SECRET_KEY=your-secret-key-here-change-in-production
-DEBUG=False
-ALLOWED_HOSTS=localhost,127.0.0.1
-```
-
-**Celery Settings**
-
-```bash
-CELERY_BROKER_URL="redis://redis:6379/0"
-CELERY_RESULT_BACKEND="redis://redis:6379/0"
-```
-
-### Optional Environment Variables
-
-**AWS Settings (Production Deployment)**
-
-```bash
-AWS_ACCESS_KEY_ID=your-aws-access-key
-AWS_SECRET_ACCESS_KEY=your-aws-secret-key
-AWS_REGION=ap-northeast-2
-ECR_REGISTRY=your-account.dkr.ecr.ap-northeast-2.amazonaws.com
-```
-
-**SonarQube Settings**
-
-```bash
-SONAR_HOST_URL=http://localhost:9000
-SONAR_TOKEN=your-sonar-token
-```
-
------
+### Deployment
+- **Docker**: Containerization
+- **Kubernetes**: Orchestration
+- **Kubeflow**: ML pipelines
+- **AWS ECR**: Container registry
 
 ## 🚀 Quick Start
 
-### Local Development Environment
+### Local Development
 
-1.  **Clone the repository**
-
-<!-- end list -->
-
+1. **Clone the repository**
 ```bash
-git clone https://github.com/209512/mlops-recommendation.git
+git clone https://github.com/209512/mlops-recommendation-platform.git
 cd mlops-recommendation-platform
 ```
 
-2.  **Configure Environment**
+2. **Set up uv virtual environment**
+```bash
+# Install uv if not already installed
+pip install uv
 
-<!-- end list -->
+# Create virtual environment
+uv venv
 
+# Activate virtual environment
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install dependencies
+uv pip install -e ".[dev]"
+```
+
+3. **Environment configuration**
 ```bash
 cp .env.example .env
-# Edit the necessary values in the .env file
+# Configure necessary values in .env file
 ```
 
-3.  **Start Services with Docker**
+4. **Start services with Docker Compose**
+```bash
+docker-compose up -d
+```
 
-<!-- end list -->
+5. **Verify applications**
+    - API: http://localhost:8000
+    - API Documentation: http://localhost:8000/docs
+    - MLflow: http://localhost:5001
+    - Grafana: http://localhost:3000
+    - Prometheus: http://localhost:9090
+
+### Development Setup
 
 ```bash
-docker compose up -d
+# Code formatting
+black app/ tests/
+ruff check app/ tests/
+
+# Type checking
+mypy app/
+
+# Run tests
+pytest --cov=app
 ```
 
-4.  **Access API Documentation**
-      - Swagger UI: http://localhost:8000/docs
-      - ReDoc: http://localhost:8000/redoc
+## 📁 Project Structure
 
-### Development Server
+```
+mlops-recommendation-platform/
+├── app/                          # Application source
+│   ├── api/                      # API routes
+│   │   ├── v1/                   # API v1 version
+│   │   │   ├── recommendations.py
+│   │   │   ├── training.py
+│   │   │   ├── mlflow.py
+│   │   │   └── monitoring.py
+│   │   ├── dependencies.py       # Dependency injection
+│   │   └── middleware.py         # Middleware
+│   ├── core/                     # Core settings
+│   │   ├── config.py             # Configuration management
+│   │   ├── security.py           # Authentication/Security
+│   │   └── exception.py          # Exception handling
+│   ├── infrastructure/           # Infrastructure layer
+│   │   ├── database.py           # Database
+│   │   ├── redis.py              # Redis client
+│   │   ├── celery.py             # Celery setup
+│   │   ├── aws.py                # AWS integration
+│   │   └── mlflow_server/        # MLflow server
+│   ├── models/                   # Database models
+│   ├── schemas/                  # Pydantic schemas
+│   ├── services/                 # Business logic
+│   │   ├── recommendation/       # Recommendation service
+│   │   │   ├── repositories/     # Data access layer
+│   │   │   ├── service.py        # Main recommendation logic
+│   │   │   ├── data_loader.py    # Data loading
+│   │   │   └── model_trainer.py  # Model training
+│   │   ├── mlflow/               # MLflow services
+│   │   └── monitoring/           # Monitoring services
+│   └── main.py                   # Application entry point
+├── k8s/                          # Kubernetes manifests
+│   ├── deployment.yaml           # Deployment configuration
+│   ├── hpa.yaml                  # Horizontal Pod Autoscaler
+│   ├── service.yaml              # Service configuration
+│   └── kubeflow/                 # Kubeflow pipelines
+├── monitoring/                   # Monitoring setup
+│   ├── prometheus/               # Prometheus configuration
+│   └── grafana/                  # Grafana dashboards
+├── scripts/                      # Utility scripts
+├── tests/                        # Test suite
+└── pyproject.toml               # Project configuration
+```
 
+## 🔧 API Usage
+
+### Get Recommendations
 ```bash
-# FastAPI Development Server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# Celery Worker
-celery -A app.infrastructure.celery worker --loglevel=info
-
-# Celery Beat (Scheduler)
-celery -A app.infrastructure.celery beat --loglevel=info
+curl -X GET "http://localhost:8000/api/v1/recommendations/user/{user_id}?limit=10"
 ```
 
------
-
-## 🧪 Testing
-
+### Train Model
 ```bash
-# Run all tests
-pytest
-
-# Coverage Report
-pytest --cov=app --cov-report=html
-
-# MyPy Type Checking
-mypy .
-
-# Ruff Linting
-ruff check . --fix
+curl -X POST "http://localhost:8000/api/v1/training/train" \
+  -H "Content-Type: application/json" \
+  -d '{"model_type": "als", "parameters": {"factors": 100, "iterations": 50}}'
 ```
 
------
+### Evaluate Model
+```bash
+curl -X GET "http://localhost:8000/api/v1/training/evaluate/{run_id}"
+```
 
 ## 📊 Monitoring
 
-### Prometheus Metrics
+### Key Metrics
+- **Recommendation Latency**: `recommendation_latency_seconds`
+- **Model Training Time**: `ml_training_duration_seconds`
+- **Model Accuracy**: `ml_model_accuracy`
+- **API Request Count**: `http_requests_total`
 
-  - http://localhost:8001/metrics
+### Grafana Dashboards
+- MLOps Comprehensive Dashboard: Model performance and system status
+- Recommendation System Dashboard: Recommendation quality and user behavior
 
-### Grafana Dashboard
-
-  - http://localhost:3000
-  - Default Login: admin/admin
-
-### SonarQube
-
-  - http://localhost:9000
-  - Project quality analysis and security scanning
-
------
-
-## ☁️ Cloud Deployment
+## 🚀 Production Deployment
 
 ### Kubernetes Deployment
-
 ```bash
-# Create Namespace
+# Create namespace
 kubectl apply -f k8s/namespace.yaml
 
-# ConfigMap and Secret
+# Apply configuration and secrets
 kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/secret.yaml
 
-# Main Application Deployment
+# Deploy application
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/hpa.yaml
 ```
 
-### AWS EKS Deployment
+### CI/CD Pipeline
+- **CI**: GitHub Actions for testing and building  
+- **CD**: EKS deployment via ArgoCD  
+- **Model Retraining**: Automated periodic retraining pipeline 
 
+## 🏗️ Architecture & Design Highlights
+
+### Recommendation Architecture
+**Multi-stage Fallback Strategy**: ALS-based collaborative filtering with intelligent fallback mechanisms to handle cold-start and data sparsity issues. When ALS recommendations fail, the system gracefully degrades to category-based recommendations, then to popular lectures, ensuring service availability while maintaining recommendation quality. 
+
+### Performance Optimization
+**Asynchronous Processing**: CPU-intensive ALS computations executed via `asyncio.to_thread()` to prevent blocking the main event loop, maintaining response times in the hundreds of milliseconds range even under load. Redis-based caching layer with user-specific invalidation significantly reduces latency for repeated requests. 
+
+### Caching Strategy
+**Intelligent Cache Management**: Redis-based user-specific recommendation caching with 5-minute TTL. Cache invalidation triggered by user interaction events ensures data freshness while optimizing performance for repeated requests.
+
+### Reliability & Scalability
+**Celery Task Architecture**: Background tasks with exponential backoff retry logic and structured logging maintain low failure rates. Process pool executor handles concurrent model training operations efficiently without memory leaks.
+
+### MLOps Pipeline
+**Automated Model Management**: Weekly retraining pipeline with performance gates ensures only models meeting quality thresholds are automatically promoted to production. MLflow integration provides complete experiment tracking and model versioning with rollback capability.
+
+### Security & Monitoring
+**Environment-based Security**: Production environment enforces short token expiration, HTTPS-only connections, and account lockout policies. Prometheus metrics collection with Grafana dashboards provides real-time visibility into system health and model performance.
+
+## 🧪 Testing
+
+### Test Execution
 ```bash
-# Configure EKS cluster access
-aws eks update-kubeconfig --region <region> --name <cluster-name>
+# Run all tests
+pytest
 
-# Push image to ECR
-aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account-id>.dkr.ecr.<region>.amazonaws.com
-docker build -t mlops-recommendation-platform .
-docker tag mlops-recommendation-platform:latest <account-id>.dkr.ecr.<region>.amazonaws.com/mlops-recommendation-platform:latest
-docker push <account-id>.dkr.ecr.<region>.amazonaws.com/mlops-recommendation-platform:latest
+# Run with coverage
+pytest --cov=app --cov-report=html
+
+# Run specific test file
+pytest tests/unit/test_recommendations.py
+
+# Run with specific markers
+pytest -m "not slow"  # Skip slow tests
+pytest -m "integration"  # Run only integration tests
 ```
 
------
+### Test Structure
+The test suite is organized into multiple layers:
 
-## 🔄 CI/CD Pipeline
-
-### GitHub Actions
-
-  - **CI**: Code quality checks, testing, and building (`.github/workflows/ci.yml`)
-  - **CD**: Automated deployment (`.github/workflows/cd.yml`)
-  - **Model Retrain**: Scheduled model retraining (`.github/workflows/model-retrain.yml`)
-
-### Code Quality Standards
-
-  - **MyPy**: Strict type checking enforced.
-  - **Ruff**: Code formatting and linting.
-  - **SonarQube**: Code quality and security analysis.
-  - **Test Coverage**: Minimum 80% coverage required.
-
------
-
-## 📈 API Usage Examples
-
-### Recommendation Requests
-
-```python
-import requests
-
-# User Recommendations
-response = requests.get(
-    "http://localhost:8000/api/v1/recommendations/users/{user_id}",
-    params={"limit": 10}
-)
-
-# Lecture Recommendations (Similar Items)
-response = requests.get(
-    "http://localhost:8000/api/v1/recommendations/lectures/{lecture_id}",
-    params={"limit": 5}
-)
+```
+tests/
+├── unit/                         # Unit tests
+│   ├── test_recommendations.py   # Recommendation logic tests
+│   ├── test_models.py           # Model tests
+│   └── test_services.py         # Service layer tests
+├── integration/                 # Integration tests
+│   ├── test_api_endpoints.py    # API integration tests
+│   ├── test_mlflow_integration.py # MLflow integration tests
+│   └── test_celery_tasks.py     # Celery task tests
+├── performance/                 # Performance tests
+│   ├── test_recommendation_latency.py
+│   └── test_model_training_performance.py
+└── e2e/                        # End-to-end tests
+    ├── test_full_recommendation_pipeline.py
+    └── test_model_deployment_pipeline.py
 ```
 
-### Model Training
+### Test Configuration
+Tests are configured in `pyproject.toml`  and use:
+- **pytest**: Primary testing framework
+- **pytest-asyncio**: For async test support
+- **pytest-cov**: Coverage reporting
+- **httpx**: For async HTTP client testing
+- **aiosqlite**: For database testing
 
-```python
-# Model Training Request
-response = requests.post(
-    "http://localhost:8000/api/v1/training/train",
-    json={"algorithm": "als", "factors": 50}
-)
-```
+### Coverage Requirements
+- Minimum coverage: 80% (enforced in CI) 
+- Coverage reports generated in XML and HTML formats
+- Integration with SonarQube for quality gates
 
------
+### Test Best Practices
+1. **Mock External Dependencies**: Use fixtures to mock MLflow, Redis, and AWS services
+2. **Database Isolation**: Each test uses a clean database state
+3. **Async Testing**: Proper async/await patterns for FastAPI endpoints
+4. **Performance Benchmarks**: Track recommendation latency and model training time
 
-## 🤝 Contribution Guide
+## 💡 Technical Challenges & Solutions
 
-1.  Fork the repository.
-2.  Create a feature branch (`git checkout -b feature/amazing-feature`).
-3.  Commit your changes (`git commit -m 'Add amazing feature'`).
-4.  Push to the branch (`git push origin feature/amazing-feature`).
-5.  Open a **Pull Request**.
+### Challenge 1: Cold Start Handling for New Users
+- **Problem**: Users without interaction history receive no meaningful recommendations
+- **Solution**: Hybrid recommendation approach combining collaborative filtering with content-based features using user preferences and lecture categories
+- **Result**: Improved user engagement for new users through personalized initial recommendations
 
-### Code Quality Standards
+### Challenge 2: Meeting Real-time Recommendation SLO
+- **Problem**: ALS model inference taking multiple seconds causing poor user experience
+- **Solution**: Asynchronous processing with `asyncio.to_thread()`, Redis caching layer, and model optimization techniques
+- **Result**: Response times maintained in hundreds of milliseconds range even under load
 
-  - **MyPy**: Strict type checking is mandatory.
-  - **Ruff**: Code formatting and linting.
-  - **SonarQube**: Code quality and security analysis.
-  - **Test Coverage**: Minimum 80% coverage required.
+### Challenge 3: Model Performance Degradation
+- **Problem**: Recommendation quality declining over time as user preferences evolve
+- **Solution**: Automated weekly retraining pipeline with performance gates and A/B testing before deployment
+- **Result**: Consistent recommendation quality maintained through continuous model improvement 
 
------
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### Development Guidelines
+- Follow the existing code style (Black + Ruff)
+- Add tests for new features
+- Update documentation
+- Ensure all tests pass before submitting PR
 
 ## 📄 License
 
-This project is licensed under the **MIT License** - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
+This project is licensed under the MIT License.
 
------
+## 🆘 Support
 
-## 🔗 References
-
-  - [Implicit Library Documentation](https://benfred.github.io/implicit/)
-  - [FastAPI Documentation](https://fastapi.tiangolo.com/)
-  - [MLflow Documentation](https://mlflow.org/docs/latest/index.html)
-  - [Kubeflow Documentation](https://www.kubeflow.org/docs/)
-  - [Prometheus Documentation](https://prometheus.io/docs/)
-  - [Kubernetes Documentation](https://kubernetes.io/docs/)
+- Issues: [GitHub Issues](https://github.com/209512/mlops-recommendation-platform/issues)
+- Documentation: [Project Wiki](https://github.com/209512/mlops-recommendation-platform/wiki)
