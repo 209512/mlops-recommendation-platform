@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Final
+from typing import Any, ClassVar
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,8 +18,8 @@ class ALSConfig(BaseSettings):
     )
 
     # 상수 (변경 x)
-    MODEL_TYPE: Final[str] = "implicit"
-    ALGORITHM_NAME: Final[str] = "als"
+    MODEL_TYPE: ClassVar[str] = "implicit"
+    ALGORITHM_NAME: ClassVar[str] = "als"
 
     # 환경별 설정 (가끔 변경)
     model_version: str = Field(default="v1", description="모델 버전")
